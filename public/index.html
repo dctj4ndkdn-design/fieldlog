@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#15171c" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="FieldLog" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<title>FieldLog — Job Tracking</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Barlow:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#15171c;--panel:#1d2026;--panel2:#22262e;--line:#2e333d;
+    --ink:#eef0f3;--sub:#8b93a1;--amber:#f5a623;--green:#3ecf8e;--red:#e5484d;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;}
+  html,body{background:var(--bg);color:var(--ink);font-family:'Barlow',system-ui,sans-serif;}
+  body{min-height:100vh;}
+  #root{max-width:920px;margin:0 auto;min-height:100vh;}
+  input,select,textarea,button{font-family:inherit;}
+  input,select,textarea{font-family:'Barlow',sans-serif;}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--amber)!important;}
+  ::placeholder{color:#5c6470;}
+  .seg:active,.padkey:active,.jobcard:active,.trade:active,.primary:active,.danger:active{transform:scale(.97);}
+  .padkey,.seg,.primary,.danger,.ghost,.jobcard,.trade,.checkrow,.backbtn,.lockbtn{transition:all .12s ease;}
+  .padkey:hover{background:var(--panel2);border-color:var(--amber);}
+  .jobcard:hover{border-color:var(--amber);transform:translateY(-2px);}
+  .primary:hover{filter:brightness(1.08);}
+  .checkrow:hover{background:var(--panel2);}
+  .ghost:hover{color:var(--amber);}
+  @keyframes shake{0%,100%{transform:translateX(0);}25%{transform:translateX(-8px);}75%{transform:translateX(8px);}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .syncdot{display:inline-block;width:8px;height:8px;border-radius:50%;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+// =================== CONFIG ===================
+const OFFICE_PIN = "1234"; // change this value and redeploy to update the office PIN
+
+const WORK_TYPES = ["Plumbing", "HVAC", "In-Floor"];
+
+// ---- CHECKLISTS ----
+// Each trade is a list of SECTIONS. Each section has a title and items.
+// An item is either a plain string, or {label, equipment:true} for items
+// that should also capture Model # and Serial #.
+const CHECKLISTS = {
+  Plumbing: [
+    { section: "DWV", items: [
+      "Groundwork done/tested",
+      "Sump Line done",
+      "Nail Plated",
+      "Overflows Checked",
+      "Above ground done/tested",
+      "Test Caps pulled",
+      "Tubs/Showers Trapped",
+      "Tub Showers Set",
+    ]},
+    { section: "Waterlines", items: [
+      "Water Lines Dropped",
+      "Basement Finish Done",
+      "Mechanical Room Done",
+      "Nail Plated",
+      "Sprinkler Line Piped",
+      { label: "Softener Done", equipment: true },
+      { label: "Water Heater Installed", equipment: true },
+      "Sioux Falls Inspected (1)",
+      "Sioux Falls Inspected (2)",
+      "Sioux Falls Inspected (3)",
+      "Desuperheater done",
+      "Valves for Sillcocks (MN)",
+    ]},
+    { section: "Gas Line", items: [
+      "Ran back to Mechanical Room",
+      "Mechanical room piped",
+      "Fire water heater",
+      "Sioux Falls Inspected (1)",
+      "Sioux Falls Inspected (2)",
+      "MN Inspected",
+      "High pressure gas tag",
+    ]},
+    { section: "Finish", items: [
+      "Fixtures Set",
+      "Dishwasher lines ran",
+      "Check hot/cold connections",
+      "Clean out Covers on",
+      "Icemaker lines run",
+      "Done/Final Inspection",
+      "Fixtures Caulked",
+      "Dishwasher set",
+      "Water temps set (delta)",
+      "Clean outs doped",
+      "Icemaker lines connected",
+      "Material list complete",
+    ]},
+  ],
+  // Placeholder starter lists — swap with real sheets later.
+  HVAC: [
+    { section: "Rough-In", items: [
+      "Verify equipment matches submittal",
+      "Set & secure ductwork / trunk lines",
+      "Seal all duct joints",
+      { label: "Air Handler / Furnace", equipment: true },
+    ]},
+    { section: "Finish", items: [
+      "Connect refrigerant lines & evacuate",
+      "Charge system to spec",
+      "Wire thermostat & controls",
+      "Test airflow at all registers",
+      "Verify condensate drain & safety switch",
+      "Clean up & remove debris",
+    ]},
+  ],
+  "In-Floor": [
+    { section: "Layout", items: [
+      "Confirm slab/subfloor prepped & clean",
+      "Lay out tubing per design spacing",
+      "Secure tubing (clips/staples/rails)",
+      "Connect manifolds & label loops",
+    ]},
+    { section: "Test & Finish", items: [
+      "Pressure test loops (hold PSI)",
+      "Photograph layout before pour/cover",
+      "Verify pressure held during pour",
+      { label: "Pump / Mixing Valve", equipment: true },
+      "Test circulation & flow per loop",
+      "Clean up & remove debris",
+    ]},
+  ],
+};
+
+// =================== DATA LAYER ===================
+const API = "/api/data";
+async function loadAll() {
+  const r = await fetch(API);
+  if (!r.ok) throw new Error("load failed (" + r.status + ")");
+  return r.json();
+}
+async function saveCollection(collection, data) {
+  const r = await fetch(API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ collection, data }),
+  });
+  if (!r.ok) throw new Error("save failed (" + r.status + ")");
+  return r.json();
+}
+
+// =================== HELPERS ===================
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const stamp = () => new Date().toLocaleString("en-US", { month:"short", day:"numeric", year:"numeric", hour:"numeric", minute:"2-digit" });
+const todayKey = () => { const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
+const itemLabel = (it) => typeof it === "string" ? it : it.label;
+const itemIsEquip = (it) => typeof it === "object" && it.equipment;
+
+// =================== APP ===================
+function App() {
+  const [status, setStatus] = useState("loading");
+  const [errMsg, setErrMsg] = useState("");
+  const [side, setSide] = useState("field");
+  const [officeAuthed, setOfficeAuthed] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  const [projects, setProjects] = useState([]);
+  const [contractors, setContractors] = useState([]);
+  const [entries, setEntries] = useState([]);
+  const [employees, setEmployees] = useState([]);
+
+  const refresh = useCallback(async () => {
+    try {
+      const d = await loadAll();
+      setProjects(d.projects || []);
+      setContractors(d.contractors || []);
+      setEntries(d.entries || []);
+      setEmployees(d.employees || []);
+      setStatus("ok");
+    } catch (e) { setErrMsg(String(e.message || e)); setStatus("error"); }
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const persist = useCallback(async (collection, data, setter) => {
+    setter(data); setSyncing(true);
+    try { await saveCollection(collection, data); }
+    catch (e) { alert("Couldn't save to the server — reloading latest data.\n\n" + (e.message || e)); await refresh(); }
+    finally { setSyncing(false); }
+  }, [refresh]);
+
+  const saveProjects    = useCallback((p) => persist("projects", p, setProjects), [persist]);
+  const saveContractors = useCallback((c) => persist("contractors", c, setContractors), [persist]);
+  const saveEntries     = useCallback((e) => persist("entries", e, setEntries), [persist]);
+  const saveEmployees   = useCallback((e) => persist("employees", e, setEmployees), [persist]);
+
+  if (status === "loading") return (
+    <div style={S.loadWrap}>
+      <div style={S.loadMark}>FIELD<span style={{color:"var(--amber)"}}>LOG</span></div>
+      <div style={S.spinner} /><div style={S.loadSub}>connecting…</div>
+    </div>
+  );
+  if (status === "error") return (
+    <div style={S.loadWrap}>
+      <div style={S.loadMark}>FIELD<span style={{color:"var(--amber)"}}>LOG</span></div>
+      <div style={{color:"var(--red)",marginTop:16,fontWeight:600}}>Couldn't reach the server</div>
+      <div style={S.loadSub}>{errMsg}</div>
+      <button className="primary" style={{...S.primaryBtn,maxWidth:200,marginTop:18}} onClick={()=>{setStatus("loading");refresh();}}>RETRY</button>
+    </div>
+  );
+
+  return (
+    <div>
+      <Header side={side} setSide={setSide} authed={officeAuthed} resetAuth={()=>setOfficeAuthed(false)} syncing={syncing} onRefresh={refresh} />
+      {side==="field" ? (
+        <FieldSide projects={projects.filter(p=>!p.removed)} entries={entries} saveEntries={saveEntries} employees={employees} />
+      ) : officeAuthed ? (
+        <OfficeSide projects={projects} saveProjects={saveProjects} contractors={contractors} saveContractors={saveContractors} entries={entries} employees={employees} saveEmployees={saveEmployees} />
+      ) : (
+        <PinGate onUnlock={()=>setOfficeAuthed(true)} />
+      )}
+    </div>
+  );
+}
+
+function Header({ side, setSide, authed, resetAuth, syncing, onRefresh }) {
+  return (
+    <header style={S.header}>
+      <div style={S.brand}>FIELD<span style={{color:"var(--amber)"}}>LOG</span><span style={S.brandTag}>JOB TRACKING</span></div>
+      <span title={syncing?"saving…":"synced"} className="syncdot" style={{background:syncing?"var(--amber)":"var(--green)"}} />
+      <button className="lockbtn" style={{...S.lockBtn,padding:"8px 10px"}} onClick={onRefresh} title="Reload latest">⟳</button>
+      <div style={S.toggle}>
+        <button className="seg" onClick={()=>setSide("field")} style={{...S.segBtn,...(side==="field"?S.segOn:{})}}>FIELD</button>
+        <button className="seg" onClick={()=>setSide("office")} style={{...S.segBtn,...(side==="office"?S.segOn:{})}}>OFFICE</button>
+      </div>
+      {side==="office" && authed && <button className="lockbtn" style={S.lockBtn} onClick={resetAuth}>🔒</button>}
+    </header>
+  );
+}
+
+function PinGate({ onUnlock }) {
+  const [pin,setPin]=useState(""); const [err,setErr]=useState(false);
+  const press=(d)=>{ setErr(false);
+    if(d==="del")return setPin(p=>p.slice(0,-1));
+    if(d==="clr")return setPin("");
+    if(pin.length>=6)return;
+    const next=pin+d; setPin(next);
+    if(next===OFFICE_PIN)setTimeout(onUnlock,150);
+    else if(next.length>=OFFICE_PIN.length){setErr(true);setTimeout(()=>setPin(""),400);}
+  };
+  return (
+    <div style={S.pinWrap}>
+      <div style={S.pinTitle}>OFFICE ACCESS</div>
+      <div style={S.pinSub}>Enter PIN to manage projects & reports</div>
+      <div style={{...S.pinDots,...(err?{animation:"shake .35s"}:{})}}>
+        {[0,1,2,3,4,5].map(i=><span key={i} style={{...S.dot,...(i<pin.length?S.dotOn:{}),...(i<OFFICE_PIN.length||i<pin.length?{}:{opacity:.25})}} />)}
+      </div>
+      {err && <div style={S.pinErr}>Incorrect PIN</div>}
+      <div style={S.pad}>
+        {["1","2","3","4","5","6","7","8","9","clr","0","del"].map(k=>
+          <button key={k} className="padkey" style={S.padKey} onClick={()=>press(k)}>{k==="del"?"⌫":k==="clr"?"C":k}</button>)}
+      </div>
+    </div>
+  );
+}
+
+// ================= FIELD =================
+function FieldSide({ projects, entries, saveEntries, employees }) {
+  const [sel,setSel]=useState(null);
+  if(projects.length===0) return <Empty msg="No active projects yet. Ask the office to set one up." />;
+  const live = sel ? projects.find(p=>p.id===sel.id) : null;
+  if(!live){
+    if(sel) setSel(null);
+    return (
+      <main style={S.main}>
+        <SectionTitle>SELECT A JOB</SectionTitle>
+        <div style={S.jobGrid}>
+          {projects.map(p=>(
+            <button key={p.id} className="jobcard" style={S.jobCard} onClick={()=>setSel(p)}>
+              <div style={S.jobName}>{p.name}</div>
+              <div style={S.jobMeta}>{p.workTypes.map(w=><span key={w} style={S.chip}>{w}</span>)}</div>
+              <div style={S.jobAddr}>{p.address||"—"}</div>
+              <div style={S.jobNum}>{p.contractor||"no contractor"}</div>
+            </button>
+          ))}
+        </div>
+      </main>
+    );
+  }
+  return <Workspace project={live} back={()=>setSel(null)} entries={entries} saveEntries={saveEntries} employees={employees} />;
+}
+
+function Workspace({ project, back, entries, saveEntries, employees }) {
+  const [trade,setTrade]=useState(project.workTypes[0]);
+  const [tab,setTab]=useState("checklist");
+  const projNum = (project.projectNumbers||{})[trade];
+  return (
+    <main style={S.main}>
+      <button className="backbtn" style={S.backBtn} onClick={back}>← All Jobs</button>
+      <div style={S.wsHead}>
+        <div style={S.wsName}>{project.name}</div>
+        <div style={S.wsSub}>{project.contractor||"—"} · {project.address||"—"}</div>
+      </div>
+      {project.workTypes.length>1 &&
+        <div style={S.tradeRow}>{project.workTypes.map(w=>
+          <button key={w} className="trade" style={{...S.tradeBtn,...(trade===w?S.tradeOn:{})}} onClick={()=>setTrade(w)}>{w}</button>)}</div>}
+      <div style={S.projNumBanner}>{trade} project #: <strong style={{color:"var(--ink)"}}>{projNum||"—"}</strong></div>
+      {(project.contacts||[]).length>0 && (
+        <div style={S.contactsBox}>
+          <div style={S.contactsHead}>JOB CONTACTS</div>
+          {project.contacts.map(c=>(
+            <div key={c.id} style={S.contactRow}>
+              <span style={S.contactName}>{c.name||"—"}</span>
+              {c.phone ? <a href={`tel:${c.phone.replace(/[^0-9+]/g,"")}`} style={S.contactPhone}>{c.phone}</a> : <span style={{color:"var(--sub)"}}>no #</span>}
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={S.tabRow}>
+        <button style={{...S.tab,...(tab==="checklist"?S.tabOn:{})}} onClick={()=>setTab("checklist")}>CHECKLIST</button>
+        <button style={{...S.tab,...(tab==="notes"?S.tabOn:{})}} onClick={()=>setTab("notes")}>DAILY NOTES</button>
+      </div>
+      {tab==="checklist"
+        ? <Checklist project={project} trade={trade} entries={entries} saveEntries={saveEntries} employees={employees} />
+        : <Notes project={project} trade={trade} entries={entries} saveEntries={saveEntries} />}
+    </main>
+  );
+}
+
+// ---- Checklist (whole-job, sectioned, equipment items) ----
+function Checklist({ project, trade, entries, saveEntries, employees }) {
+  const sections = CHECKLISTS[trade] || [];
+  // checklist records for this project+trade (whole-job, no day filter)
+  const recs = entries.filter(e=>e.type==="check"&&e.projectId===project.id&&e.trade===trade);
+  const byItem = {}; recs.forEach(r=>byItem[r.item]=r);
+  // extra equipment the techs added
+  const extraEquip = entries.filter(e=>e.type==="equip"&&e.projectId===project.id&&e.trade===trade).sort((a,b)=>a.id.localeCompare(b.id));
+
+  const [active,setActive]=useState(null); // item label being filled in
+  const [addingEquip,setAddingEquip]=useState(false);
+
+  const allItems = sections.flatMap(s=>s.items);
+  const done = allItems.filter(it=>byItem[itemLabel(it)]).length;
+
+  const saveCheck = (label, name, model, serial) => {
+    const rec = { id:uid(), type:"check", projectId:project.id, trade, item:label, name:name.trim(), ts:stamp(), day:todayKey() };
+    if(model!==undefined) rec.model = model.trim();
+    if(serial!==undefined) rec.serial = serial.trim();
+    saveEntries([rec, ...entries]); setActive(null);
+  };
+  const saveExtraEquip = (equipName, name, model, serial) => {
+    const rec = { id:uid(), type:"equip", projectId:project.id, trade, equipName:equipName.trim(), name:name.trim(), model:model.trim(), serial:serial.trim(), ts:stamp(), day:todayKey() };
+    saveEntries([rec, ...entries]); setAddingEquip(false);
+  };
+
+  return (
+    <div>
+      <div style={S.progress}>
+        <div style={S.progressBar}><div style={{...S.progressFill,width:`${allItems.length?(done/allItems.length)*100:0}%`}} /></div>
+        <span style={S.progressTxt}>{done}/{allItems.length} done</span>
+      </div>
+
+      {sections.map(sec=>(
+        <div key={sec.section} style={{marginBottom:18}}>
+          <div style={S.secHead}>{sec.section}</div>
+          <div style={S.checkList}>
+            {sec.items.map(it=>{
+              const label=itemLabel(it); const rec=byItem[label]; const equip=itemIsEquip(it);
+              return (
+                <div key={label}>
+                  <div className={rec?"":"checkrow"} style={{...S.checkRow,...(rec?S.checkRowDone:{})}} onClick={()=>{ if(!rec) setActive(active===label?null:label); }}>
+                    <span style={{...S.box,...(rec?S.boxOn:{})}}>{rec?"✓":""}</span>
+                    <div style={{flex:1}}>
+                      <div style={{...S.checkTxt}}>{label}{equip&&!rec&&<span style={S.equipTag}>model / serial</span>}</div>
+                      {rec && <div style={S.checkStamp}>✓ {rec.name} · {rec.ts}</div>}
+                      {rec && rec.model!==undefined && (rec.model||rec.serial) && (
+                        <div style={S.equipVals}>Model: {rec.model||"—"} · Serial: {rec.serial||"—"}</div>
+                      )}
+                    </div>
+                  </div>
+                  {active===label && !rec && (
+                    <CheckForm equip={equip} employees={employees} onCancel={()=>setActive(null)} onSave={(name,model,serial)=>saveCheck(label,name,equip?model:undefined,equip?serial:undefined)} />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      {/* Additional equipment */}
+      <div style={{marginBottom:18}}>
+        <div style={S.secHead}>Additional Equipment</div>
+        {extraEquip.map(eq=>(
+          <div key={eq.id} style={{...S.checkRow,...S.checkRowDone}}>
+            <span style={{...S.box,...S.boxOn}}>✓</span>
+            <div style={{flex:1}}>
+              <div style={S.checkTxt}>{eq.equipName}</div>
+              <div style={S.checkStamp}>✓ {eq.name} · {eq.ts}</div>
+              <div style={S.equipVals}>Model: {eq.model||"—"} · Serial: {eq.serial||"—"}</div>
+            </div>
+          </div>
+        ))}
+        {!addingEquip
+          ? <button className="ghost" style={S.ghostBtn} onClick={()=>setAddingEquip(true)}>+ Add equipment</button>
+          : <ExtraEquipForm employees={employees} onCancel={()=>setAddingEquip(false)} onSave={saveExtraEquip} />}
+      </div>
+
+      <p style={S.hint}>This is a whole-job checklist — items stay checked for the life of the job. Once checked, an item locks and records who & when.</p>
+    </div>
+  );
+}
+
+// employee picker w/ "type a name" fallback
+function NamePicker({ employees, value, onChange, typed, setTyped, useTyped, setUseTyped }) {
+  return (
+    <div>
+      <label style={S.fieldLabel}>NAME <span style={{color:"var(--amber)"}}>*required</span></label>
+      {!useTyped ? (
+        <select style={S.input} value={value} onChange={e=>{ if(e.target.value==="__type__"){setUseTyped(true);} else onChange(e.target.value); }}>
+          <option value="">— choose employee —</option>
+          {employees.map(emp=><option key={emp.id} value={emp.name}>{emp.name}</option>)}
+          <option value="__type__">+ type a name…</option>
+        </select>
+      ) : (
+        <div style={{display:"flex",gap:8}}>
+          <input style={S.input} placeholder="Type name" value={typed} onChange={e=>setTyped(e.target.value)} />
+          {employees.length>0 && <button className="ghost" style={S.ghostBtn} onClick={()=>{setUseTyped(false);setTyped("");}}>list</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CheckForm({ equip, employees, onSave, onCancel }) {
+  const [sel,setSel]=useState(""); const [typed,setTyped]=useState(""); const [useTyped,setUseTyped]=useState(employees.length===0);
+  const [model,setModel]=useState(""); const [serial,setSerial]=useState("");
+  const submit=()=>{ const name=useTyped?typed:sel; if(!name.trim()) return alert("Pick or type a name."); onSave(name,model,serial); };
+  return (
+    <div style={S.checkForm}>
+      <NamePicker employees={employees} value={sel} onChange={setSel} typed={typed} setTyped={setTyped} useTyped={useTyped} setUseTyped={setUseTyped} />
+      {equip && (
+        <div style={{marginTop:10}}>
+          <div style={S.formRow}>
+            <div style={{flex:1}}><label style={S.fieldLabel}>MODEL #</label><input style={S.input} value={model} onChange={e=>setModel(e.target.value)} /></div>
+            <div style={{flex:1}}><label style={S.fieldLabel}>SERIAL #</label><input style={S.input} value={serial} onChange={e=>setSerial(e.target.value)} /></div>
+          </div>
+        </div>
+      )}
+      <div style={{display:"flex",gap:8,marginTop:10}}>
+        <button className="primary" style={{...S.primaryBtn,flex:1,marginTop:0}} onClick={submit}>CHECK OFF (locks)</button>
+        <button className="ghost" style={S.ghostBtn} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function ExtraEquipForm({ employees, onSave, onCancel }) {
+  const [equipName,setEquipName]=useState("");
+  const [sel,setSel]=useState(""); const [typed,setTyped]=useState(""); const [useTyped,setUseTyped]=useState(employees.length===0);
+  const [model,setModel]=useState(""); const [serial,setSerial]=useState("");
+  const submit=()=>{ const name=useTyped?typed:sel; if(!equipName.trim())return alert("Name the equipment."); if(!name.trim())return alert("Pick or type a name."); onSave(equipName,name,model,serial); };
+  return (
+    <div style={S.checkForm}>
+      <label style={S.fieldLabel}>EQUIPMENT</label>
+      <input style={S.input} placeholder="e.g. RO Drinking Water System" value={equipName} onChange={e=>setEquipName(e.target.value)} />
+      <div style={{marginTop:10}}><NamePicker employees={employees} value={sel} onChange={setSel} typed={typed} setTyped={setTyped} useTyped={useTyped} setUseTyped={setUseTyped} /></div>
+      <div style={{...S.formRow,marginTop:10}}>
+        <div style={{flex:1}}><label style={S.fieldLabel}>MODEL #</label><input style={S.input} value={model} onChange={e=>setModel(e.target.value)} /></div>
+        <div style={{flex:1}}><label style={S.fieldLabel}>SERIAL #</label><input style={S.input} value={serial} onChange={e=>setSerial(e.target.value)} /></div>
+      </div>
+      <div style={{display:"flex",gap:8,marginTop:10}}>
+        <button className="primary" style={{...S.primaryBtn,flex:1,marginTop:0}} onClick={submit}>SAVE EQUIPMENT</button>
+        <button className="ghost" style={S.ghostBtn} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// ---- Notes (unchanged behavior) ----
+function Notes({ project, trade, entries, saveEntries }) {
+  const [name,setName]=useState(""); const [text,setText]=useState("");
+  const notes=entries.filter(e=>e.type==="note"&&e.projectId===project.id&&e.trade===trade).sort((a,b)=>b.id.localeCompare(a.id));
+  const addNote=()=>{ if(!name.trim())return alert("Name is required."); if(!text.trim())return alert("Write something first.");
+    saveEntries([{id:uid(),type:"note",projectId:project.id,trade,name:name.trim(),text:text.trim(),ts:stamp(),day:todayKey(),addenda:[]},...entries]); setText(""); };
+  const addAddendum=(noteId,an,at)=> saveEntries(entries.map(e=> e.id===noteId?{...e,addenda:[...(e.addenda||[]),{id:uid(),name:an.trim(),text:at.trim(),ts:stamp()}]}:e));
+  return (
+    <div>
+      <div style={S.nameWrap}>
+        <label style={S.nameLabel}>NAME <span style={{color:"var(--amber)"}}>*required</span></label>
+        <input style={S.input} placeholder="Who's filling this out?" value={name} onChange={e=>setName(e.target.value)} />
+      </div>
+      <textarea style={S.textarea} rows={4} placeholder={`What work did you complete today on the ${trade.toLowerCase()} scope?`} value={text} onChange={e=>setText(e.target.value)} />
+      <button className="primary" style={S.primaryBtn} onClick={addNote}>SAVE NOTE (locks on save)</button>
+      <p style={S.hint}>Saved notes can't be edited or deleted. You can append an addendum — the original always stays.</p>
+      <div style={S.noteFeed}>
+        {notes.length===0 && <div style={S.noNotes}>No notes yet for {trade}.</div>}
+        {notes.map(n=><NoteCard key={n.id} note={n} onAddendum={addAddendum} />)}
+      </div>
+    </div>
+  );
+}
+function NoteCard({ note, onAddendum }) {
+  const [open,setOpen]=useState(false); const [an,setAn]=useState(""); const [at,setAt]=useState("");
+  const submit=()=>{ if(!an.trim()||!at.trim())return alert("Addendum needs a name and text."); onAddendum(note.id,an,at); setAn("");setAt("");setOpen(false); };
+  return (
+    <div style={S.noteCard}>
+      <div style={S.noteHead}><span style={S.noteAuthor}>{note.name}</span><span style={S.noteTs}>{note.ts}</span></div>
+      <div style={S.noteBody}>{note.text}</div>
+      {(note.addenda||[]).map(a=><div key={a.id} style={S.addendum}><div style={S.addHead}>↳ ADDENDUM · {a.name} · {a.ts}</div><div style={S.addBody}>{a.text}</div></div>)}
+      {!open?<button className="ghost" style={S.ghostBtn} onClick={()=>setOpen(true)}>+ Add addendum</button>:(
+        <div style={S.addForm}>
+          <input style={S.input} placeholder="Your name" value={an} onChange={e=>setAn(e.target.value)} />
+          <textarea style={{...S.textarea,marginTop:8}} rows={2} placeholder="Addendum…" value={at} onChange={e=>setAt(e.target.value)} />
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <button className="primary" style={{...S.primaryBtn,flex:1}} onClick={submit}>SAVE ADDENDUM</button>
+            <button className="ghost" style={S.ghostBtn} onClick={()=>setOpen(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ================= OFFICE =================
+function OfficeSide({ projects, saveProjects, contractors, saveContractors, entries, employees, saveEmployees }) {
+  const [tab,setTab]=useState("projects");
+  return (
+    <main style={S.main}>
+      <div style={S.tabRow}>
+        <button style={{...S.tab,...(tab==="projects"?S.tabOn:{})}} onClick={()=>setTab("projects")}>PROJECTS</button>
+        <button style={{...S.tab,...(tab==="contractors"?S.tabOn:{})}} onClick={()=>setTab("contractors")}>CONTRACTORS</button>
+        <button style={{...S.tab,...(tab==="employees"?S.tabOn:{})}} onClick={()=>setTab("employees")}>EMPLOYEES</button>
+        <button style={{...S.tab,...(tab==="reports"?S.tabOn:{})}} onClick={()=>setTab("reports")}>REPORTS</button>
+      </div>
+      {tab==="projects" && <ProjectsAdmin projects={projects} saveProjects={saveProjects} contractors={contractors} entries={entries} />}
+      {tab==="contractors" && <ContractorsAdmin contractors={contractors} saveContractors={saveContractors} />}
+      {tab==="employees" && <EmployeesAdmin employees={employees} saveEmployees={saveEmployees} />}
+      {tab==="reports" && <Reports projects={projects} entries={entries} />}
+    </main>
+  );
+}
+
+function ProjectsAdmin({ projects, saveProjects, contractors, entries }) {
+  const blank={ name:"", address:"", contractor:"", workTypes:[], projectNumbers:{}, contacts:[] };
+  const [form,setForm]=useState(blank);
+  const [editingId,setEditingId]=useState(null); // null = creating
+  const [showRemoved,setShowRemoved]=useState(false);
+  const active=projects.filter(p=>!p.removed); const removed=projects.filter(p=>p.removed);
+
+  const toggleType=(w)=>setForm(f=>{
+    const has=f.workTypes.includes(w);
+    // guard: removing a trade that has logged activity
+    if(has && editingId){
+      const hasActivity=(entries||[]).some(e=>e.projectId===editingId && e.trade===w && (e.type==="check"||e.type==="equip"||e.type==="note"));
+      if(hasActivity && !confirm(`${w} already has checklist or note activity logged on this job. Remove it anyway? (The logged data stays in the system but the trade won't show on the job.)`)) return f;
+    }
+    const workTypes=has?f.workTypes.filter(x=>x!==w):[...f.workTypes,w];
+    const projectNumbers={...f.projectNumbers}; if(has) delete projectNumbers[w];
+    return {...f,workTypes,projectNumbers};
+  });
+  const setNum=(w,v)=>setForm(f=>({...f,projectNumbers:{...f.projectNumbers,[w]:v}}));
+
+  // contacts
+  const addContact=()=>setForm(f=>({...f,contacts:[...(f.contacts||[]),{id:uid(),name:"",phone:""}]}));
+  const setContact=(id,key,val)=>setForm(f=>({...f,contacts:f.contacts.map(c=>c.id===id?{...c,[key]:val}:c)}));
+  const delContact=(id)=>setForm(f=>({...f,contacts:f.contacts.filter(c=>c.id!==id)}));
+
+  const resetForm=()=>{ setForm(blank); setEditingId(null); };
+
+  const startEdit=(p)=>{
+    setEditingId(p.id);
+    setForm({ name:p.name, address:p.address||"", contractor:p.contractor||"", workTypes:[...p.workTypes], projectNumbers:{...(p.projectNumbers||{})}, contacts:(p.contacts||[]).map(c=>({...c})) });
+    window.scrollTo({top:0,behavior:"smooth"});
+  };
+
+  const validate=()=>{
+    if(!form.name.trim()){ alert("Job name is required."); return null; }
+    if(form.workTypes.length===0){ alert("Pick at least one type of work."); return null; }
+    for(const w of form.workTypes){ if(!(form.projectNumbers[w]||"").trim()){ alert(`Enter a project number for ${w}.`); return null; } }
+    const cleanNums={}; form.workTypes.forEach(w=>cleanNums[w]=form.projectNumbers[w].trim());
+    const cleanContacts=(form.contacts||[]).filter(c=>c.name.trim()||c.phone.trim()).map(c=>({id:c.id,name:c.name.trim(),phone:c.phone.trim()}));
+    return { ...form, name:form.name.trim(), projectNumbers:cleanNums, contacts:cleanContacts };
+  };
+
+  const create=()=>{ const v=validate(); if(!v) return; saveProjects([{...v,id:uid(),removed:false,created:stamp()},...projects]); resetForm(); };
+  const saveEdit=()=>{ const v=validate(); if(!v) return; saveProjects(projects.map(p=>p.id===editingId?{...p,...v}:p)); resetForm(); };
+
+  const remove=(id)=>{ if(!confirm("Remove this project? It moves to the Removed list (data kept).")) return; saveProjects(projects.map(p=>p.id===id?{...p,removed:true}:p)); if(editingId===id) resetForm(); };
+  const restore=(id)=> saveProjects(projects.map(p=>p.id===id?{...p,removed:false}:p));
+
+  return (
+    <div>
+      <SectionTitle>{editingId?"EDIT JOB":"SET UP A JOB"}</SectionTitle>
+      <div style={{...S.formCard, ...(editingId?{borderColor:"var(--amber)"}:{})}}>
+        {editingId && <div style={S.editBanner}>Editing an existing job — changes apply everywhere.</div>}
+        <Field label="JOB NAME *"><input style={S.input} value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. Maple Street Townhomes" /></Field>
+        <Field label="CONTRACTOR">
+          <select style={S.input} value={form.contractor} onChange={e=>setForm({...form,contractor:e.target.value})}>
+            <option value="">— choose —</option>
+            {contractors.map(c=><option key={c.id} value={c.name}>{c.name}</option>)}
+            {form.contractor && !contractors.some(c=>c.name===form.contractor) && <option value={form.contractor}>{form.contractor} (not in list)</option>}
+          </select>
+        </Field>
+        <Field label="ADDRESS"><input style={S.input} value={form.address} onChange={e=>setForm({...form,address:e.target.value})} placeholder="Street, City, State" /></Field>
+        <Field label="TYPE OF WORK *  (each gets its own project #)">
+          <div style={S.typeRow}>{WORK_TYPES.map(w=>
+            <button key={w} className="trade" style={{...S.tradeBtn,...(form.workTypes.includes(w)?S.tradeOn:{})}} onClick={()=>toggleType(w)}>{form.workTypes.includes(w)?"✓ ":""}{w}</button>)}</div>
+        </Field>
+        {form.workTypes.length>0 && (
+          <div style={S.numBox}>
+            {form.workTypes.map(w=>(
+              <Field key={w} label={`${w.toUpperCase()} PROJECT # *`}>
+                <input style={S.input} value={form.projectNumbers[w]||""} onChange={e=>setNum(w,e.target.value)} placeholder={`e.g. 2026-${w[0]}114`} />
+              </Field>
+            ))}
+          </div>
+        )}
+        <Field label="SITE CONTACTS  (super, GC, inspector…)">
+          {(form.contacts||[]).map(c=>(
+            <div key={c.id} style={{display:"flex",gap:8,marginBottom:8}}>
+              <input style={{...S.input,flex:2}} placeholder="Name / role" value={c.name} onChange={e=>setContact(c.id,"name",e.target.value)} />
+              <input style={{...S.input,flex:2}} placeholder="Phone" value={c.phone} onChange={e=>setContact(c.id,"phone",e.target.value)} />
+              <button className="danger" style={{...S.dangerBtn,padding:"8px 12px"}} onClick={()=>delContact(c.id)}>✕</button>
+            </div>
+          ))}
+          <button className="ghost" style={S.ghostBtn} onClick={addContact}>+ Add contact</button>
+        </Field>
+        {editingId ? (
+          <div style={{display:"flex",gap:8}}>
+            <button className="primary" style={{...S.primaryBtn,flex:1}} onClick={saveEdit}>SAVE CHANGES</button>
+            <button className="ghost" style={S.ghostBtn} onClick={resetForm}>Cancel</button>
+          </div>
+        ) : (
+          <button className="primary" style={S.primaryBtn} onClick={create}>+ CREATE JOB</button>
+        )}
+      </div>
+      <SectionTitle>ACTIVE JOBS ({active.length})</SectionTitle>
+      {active.length===0 && <div style={S.noNotes}>No active jobs.</div>}
+      {active.map(p=>(
+        <div key={p.id} style={{...S.adminRow, ...(editingId===p.id?{borderColor:"var(--amber)"}:{})}}>
+          <div style={{flex:1}}>
+            <div style={S.adminName}>{p.name}</div>
+            <div style={S.adminMeta}>{p.contractor||"—"}</div>
+            <div style={S.adminAddr}>{p.address||"—"}</div>
+            <div style={S.numList}>{p.workTypes.map(w=><span key={w} style={S.numChip}>{w}: <strong style={{color:"var(--ink)"}}>{(p.projectNumbers||{})[w]||"n/a"}</strong></span>)}</div>
+            {(p.contacts||[]).length>0 && <div style={S.adminMeta}>Contacts: {p.contacts.map(c=>c.name||c.phone).join(", ")}</div>}
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            <button className="ghost" style={S.editBtn} onClick={()=>startEdit(p)}>EDIT</button>
+            <button className="danger" style={S.dangerBtn} onClick={()=>remove(p.id)}>REMOVE</button>
+          </div>
+        </div>
+      ))}
+      {removed.length>0 && (<>
+        <button className="ghost" style={{...S.ghostBtn,marginTop:18}} onClick={()=>setShowRemoved(!showRemoved)}>{showRemoved?"Hide":"Show"} removed jobs ({removed.length})</button>
+        {showRemoved && removed.map(p=>(
+          <div key={p.id} style={{...S.adminRow,opacity:.6}}>
+            <div style={{flex:1}}><div style={S.adminName}>{p.name}</div><div style={S.adminMeta}>removed</div></div>
+            <button className="ghost" style={S.ghostBtn} onClick={()=>restore(p.id)}>RESTORE</button>
+          </div>
+        ))}
+      </>)}
+    </div>
+  );
+}
+
+function ContractorsAdmin({ contractors, saveContractors }) {
+  const [name,setName]=useState(""); const [phone,setPhone]=useState("");
+  const add=()=>{ if(!name.trim())return alert("Contractor name required."); saveContractors([{id:uid(),name:name.trim(),phone:phone.trim()},...contractors]); setName("");setPhone(""); };
+  const del=(id)=>{ if(confirm("Remove this contractor from the list?")) saveContractors(contractors.filter(c=>c.id!==id)); };
+  return (
+    <div>
+      <SectionTitle>ADD CONTRACTOR</SectionTitle>
+      <div style={S.formCard}>
+        <div style={S.formRow}>
+          <Field label="NAME *"><input style={S.input} value={name} onChange={e=>setName(e.target.value)} placeholder="Company / contact" /></Field>
+          <Field label="PHONE"><input style={S.input} value={phone} onChange={e=>setPhone(e.target.value)} placeholder="Optional" /></Field>
+        </div>
+        <button className="primary" style={S.primaryBtn} onClick={add}>+ SAVE CONTRACTOR</button>
+      </div>
+      <SectionTitle>SAVED CONTRACTORS ({contractors.length})</SectionTitle>
+      {contractors.length===0 && <div style={S.noNotes}>No contractors saved yet.</div>}
+      {contractors.map(c=>(
+        <div key={c.id} style={S.adminRow}>
+          <div style={{flex:1}}><div style={S.adminName}>{c.name}</div>{c.phone && <div style={S.adminMeta}>{c.phone}</div>}</div>
+          <button className="danger" style={S.dangerBtn} onClick={()=>del(c.id)}>DELETE</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EmployeesAdmin({ employees, saveEmployees }) {
+  const [name,setName]=useState("");
+  const add=()=>{ if(!name.trim())return alert("Employee name required."); saveEmployees([...employees,{id:uid(),name:name.trim()}].sort((a,b)=>a.name.localeCompare(b.name))); setName(""); };
+  const del=(id)=>{ if(confirm("Remove this employee from the dropdown list?")) saveEmployees(employees.filter(e=>e.id!==id)); };
+  return (
+    <div>
+      <SectionTitle>ADD EMPLOYEE</SectionTitle>
+      <div style={S.formCard}>
+        <div style={{display:"flex",gap:8}}>
+          <input style={S.input} value={name} onChange={e=>setName(e.target.value)} placeholder="Employee name" onKeyDown={e=>{if(e.key==="Enter")add();}} />
+          <button className="primary" style={{...S.primaryBtn,marginTop:0,width:"auto",padding:"0 22px"}} onClick={add}>+ ADD</button>
+        </div>
+        <p style={S.hint}>These names fill the dropdown the techs use when checking items off.</p>
+      </div>
+      <SectionTitle>EMPLOYEES ({employees.length})</SectionTitle>
+      {employees.length===0 && <div style={S.noNotes}>No employees yet.</div>}
+      {employees.map(emp=>(
+        <div key={emp.id} style={S.adminRow}>
+          <div style={{flex:1}}><div style={S.adminName}>{emp.name}</div></div>
+          <button className="danger" style={S.dangerBtn} onClick={()=>del(emp.id)}>DELETE</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Reports({ projects, entries }) {
+  const [day,setDay]=useState(todayKey());
+  const dayEntries=entries.filter(e=>e.day===day);
+  const notes=dayEntries.filter(e=>e.type==="note");
+  const checks=dayEntries.filter(e=>e.type==="check"||e.type==="equip");
+  const pName=(id)=>(projects.find(p=>p.id===id)||{}).name||"Unknown job";
+  const pNum=(id,trade)=>((projects.find(p=>p.id===id)||{}).projectNumbers||{})[trade]||"n/a";
+  const groups={}; checks.forEach(c=>{ const k=c.projectId+"|"+c.trade; (groups[k]=groups[k]||[]).push(c); });
+  return (
+    <div>
+      <SectionTitle>DAILY ACTIVITY REPORT</SectionTitle>
+      <div style={S.formCard}>
+        <Field label="DATE"><input type="date" style={S.input} value={day} onChange={e=>setDay(e.target.value)} /></Field>
+        <div style={S.reportStats}>
+          <Stat n={notes.length} label="Notes logged" />
+          <Stat n={checks.length} label="Items checked" />
+          <Stat n={new Set(dayEntries.map(e=>e.name)).size} label="Crew active" />
+        </div>
+      </div>
+      <SectionTitle>NOTES — {day}</SectionTitle>
+      {notes.length===0 && <div style={S.noNotes}>No notes on this date.</div>}
+      {notes.map(n=>(
+        <div key={n.id} style={S.noteCard}>
+          <div style={S.noteHead}><span style={S.noteAuthor}>{n.name}</span><span style={S.noteTs}>{n.ts}</span></div>
+          <div style={S.repProj}>{pName(n.projectId)} · {n.trade} #{pNum(n.projectId,n.trade)}</div>
+          <div style={S.noteBody}>{n.text}</div>
+          {(n.addenda||[]).map(a=><div key={a.id} style={S.addendum}><div style={S.addHead}>↳ ADDENDUM · {a.name} · {a.ts}</div><div style={S.addBody}>{a.text}</div></div>)}
+        </div>
+      ))}
+      <SectionTitle>CHECKLIST ACTIVITY — {day}</SectionTitle>
+      {Object.keys(groups).length===0 && <div style={S.noNotes}>No checklist activity on this date.</div>}
+      {Object.entries(groups).map(([k,list])=>{ const [pid,trade]=k.split("|"); return (
+        <div key={k} style={S.noteCard}>
+          <div style={S.repProj}>{pName(pid)} · {trade} #{pNum(pid,trade)}</div>
+          {list.map(c=>(
+            <div key={c.id} style={S.repCheck}>
+              ✓ {c.type==="equip"?c.equipName:c.item} <span style={S.noteTs}>— {c.name}, {c.ts}</span>
+              {(c.model||c.serial) && <div style={S.equipVals}>Model: {c.model||"—"} · Serial: {c.serial||"—"}</div>}
+            </div>
+          ))}
+        </div>
+      );})}
+    </div>
+  );
+}
+
+function Stat({ n, label }) { return <div style={S.stat}><div style={S.statN}>{n}</div><div style={S.statL}>{label}</div></div>; }
+function SectionTitle({ children }) { return <h2 style={S.sectionTitle}>{children}</h2>; }
+function Field({ label, children }) { return <div style={{marginBottom:14,flex:1}}><label style={S.fieldLabel}>{label}</label>{children}</div>; }
+function Empty({ msg }) { return <main style={S.main}><div style={S.noNotes}>{msg}</div></main>; }
+
+// =================== styles ===================
+const C={bg:"#15171c",panel:"#1d2026",panel2:"#22262e",line:"#2e333d",ink:"#eef0f3",sub:"#8b93a1",amber:"#f5a623",green:"#3ecf8e",red:"#e5484d"};
+const S={
+  loadWrap:{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"'Oswald',sans-serif",padding:20,textAlign:"center"},
+  loadMark:{fontSize:40,fontWeight:700,letterSpacing:2,color:C.ink},
+  loadSub:{color:C.sub,marginTop:10,letterSpacing:1,fontFamily:"'Barlow',sans-serif"},
+  spinner:{width:28,height:28,border:`3px solid ${C.line}`,borderTopColor:C.amber,borderRadius:"50%",marginTop:20,animation:"spin .8s linear infinite"},
+  header:{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",borderBottom:`2px solid ${C.line}`,background:C.panel,position:"sticky",top:0,zIndex:10,flexWrap:"wrap"},
+  brand:{fontFamily:"'Oswald',sans-serif",fontWeight:700,fontSize:22,letterSpacing:1.5,display:"flex",alignItems:"baseline",gap:8},
+  brandTag:{fontSize:9,letterSpacing:2,color:C.sub,fontFamily:"'Barlow',sans-serif",fontWeight:600},
+  toggle:{marginLeft:"auto",display:"flex",background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.line}`},
+  segBtn:{fontFamily:"'Oswald',sans-serif",fontWeight:600,letterSpacing:1,border:"none",background:"transparent",color:C.sub,padding:"8px 16px",borderRadius:6,cursor:"pointer",fontSize:14},
+  segOn:{background:C.amber,color:"#1a1a1a"},
+  lockBtn:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,background:"transparent",border:`1px solid ${C.line}`,color:C.sub,padding:"8px 12px",borderRadius:6,cursor:"pointer",fontSize:14},
+  main:{padding:"20px 16px 70px"},
+  pinWrap:{padding:"40px 24px 60px",maxWidth:340,margin:"0 auto",textAlign:"center"},
+  pinTitle:{fontFamily:"'Oswald',sans-serif",fontSize:26,fontWeight:700,letterSpacing:2},
+  pinSub:{color:C.sub,fontSize:14,marginTop:6,marginBottom:28},
+  pinDots:{display:"flex",gap:12,justifyContent:"center",marginBottom:8},
+  dot:{width:14,height:14,borderRadius:"50%",background:"transparent",border:`2px solid ${C.sub}`},
+  dotOn:{background:C.amber,borderColor:C.amber},
+  pinErr:{color:C.red,fontSize:13,marginBottom:8,fontWeight:600},
+  pad:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginTop:24},
+  padKey:{fontFamily:"'Oswald',sans-serif",fontSize:24,padding:"18px 0",background:C.panel,border:`1px solid ${C.line}`,color:C.ink,borderRadius:12,cursor:"pointer",fontWeight:500},
+  sectionTitle:{fontFamily:"'Oswald',sans-serif",fontSize:15,fontWeight:600,letterSpacing:2,color:C.amber,margin:"22px 0 12px",textTransform:"uppercase"},
+  jobGrid:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:14},
+  jobCard:{textAlign:"left",background:C.panel,border:`1px solid ${C.line}`,borderRadius:14,padding:18,cursor:"pointer",borderLeft:`4px solid ${C.amber}`},
+  jobName:{fontFamily:"'Oswald',sans-serif",fontSize:20,fontWeight:600,marginBottom:8},
+  jobMeta:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10},
+  chip:{fontSize:11,fontWeight:600,letterSpacing:.5,background:C.panel2,color:C.green,padding:"3px 9px",borderRadius:20,border:`1px solid ${C.line}`},
+  jobAddr:{color:C.ink,fontSize:14},
+  jobNum:{color:C.sub,fontSize:12,marginTop:4},
+  backBtn:{background:"transparent",border:"none",color:C.sub,cursor:"pointer",fontSize:14,fontWeight:600,padding:0,marginBottom:14},
+  wsHead:{marginBottom:16},
+  wsName:{fontFamily:"'Oswald',sans-serif",fontSize:26,fontWeight:700},
+  wsSub:{color:C.sub,fontSize:13,marginTop:2},
+  projNumBanner:{fontSize:13,color:C.sub,background:C.panel,border:`1px solid ${C.line}`,borderRadius:8,padding:"8px 12px",marginBottom:14},
+  contactsBox:{background:C.panel,border:`1px solid ${C.line}`,borderRadius:10,padding:"12px 14px",marginBottom:14},
+  contactsHead:{fontFamily:"'Oswald',sans-serif",fontSize:11,letterSpacing:2,color:C.amber,fontWeight:600,marginBottom:8},
+  contactRow:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,padding:"6px 0",borderTop:`1px solid ${C.line}`},
+  contactName:{fontSize:14,color:C.ink,fontWeight:500},
+  contactPhone:{fontSize:15,color:C.green,fontWeight:600,textDecoration:"none"},
+  editBanner:{fontSize:12,color:C.amber,fontWeight:600,marginBottom:12,fontStyle:"italic"},
+  editBtn:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,background:"transparent",border:`1px solid ${C.line}`,color:C.ink,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:600,flexShrink:0},
+  tradeRow:{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"},
+  typeRow:{display:"flex",gap:8,flexWrap:"wrap"},
+  tradeBtn:{fontFamily:"'Barlow',sans-serif",fontWeight:600,fontSize:14,background:C.panel,border:`1px solid ${C.line}`,color:C.sub,padding:"9px 16px",borderRadius:8,cursor:"pointer"},
+  tradeOn:{background:C.panel2,color:C.amber,borderColor:C.amber},
+  tabRow:{display:"flex",borderBottom:`2px solid ${C.line}`,marginBottom:18},
+  tab:{flex:1,fontFamily:"'Oswald',sans-serif",letterSpacing:1,fontWeight:600,fontSize:13,background:"transparent",border:"none",borderBottom:"3px solid transparent",color:C.sub,padding:"12px 0",cursor:"pointer",marginBottom:-2},
+  tabOn:{color:C.ink,borderBottom:`3px solid ${C.amber}`},
+  nameWrap:{marginBottom:16},
+  nameLabel:{display:"block",fontFamily:"'Oswald',sans-serif",fontSize:12,letterSpacing:1.5,color:C.sub,marginBottom:6},
+  fieldLabel:{display:"block",fontFamily:"'Oswald',sans-serif",fontSize:11,letterSpacing:1.5,color:C.sub,marginBottom:6},
+  input:{width:"100%",background:C.bg,border:`1px solid ${C.line}`,color:C.ink,borderRadius:8,padding:"12px 14px",fontSize:16},
+  textarea:{width:"100%",background:C.bg,border:`1px solid ${C.line}`,color:C.ink,borderRadius:8,padding:"12px 14px",fontSize:16,resize:"vertical",lineHeight:1.5},
+  progress:{display:"flex",alignItems:"center",gap:12,marginBottom:18},
+  progressBar:{flex:1,height:8,background:C.panel,borderRadius:20,overflow:"hidden"},
+  progressFill:{height:"100%",background:C.green,transition:"width .3s"},
+  progressTxt:{fontSize:13,color:C.sub,fontWeight:600,fontFamily:"'Oswald',sans-serif",letterSpacing:1},
+  secHead:{fontFamily:"'Oswald',sans-serif",fontSize:13,fontWeight:600,letterSpacing:2,color:C.ink,textTransform:"uppercase",borderBottom:`1px solid ${C.line}`,paddingBottom:6,marginBottom:10},
+  checkList:{display:"flex",flexDirection:"column",gap:8},
+  checkRow:{display:"flex",gap:14,alignItems:"flex-start",background:C.panel,border:`1px solid ${C.line}`,borderRadius:10,padding:"14px 16px",cursor:"pointer"},
+  checkRowDone:{cursor:"default",borderColor:"rgba(62,207,142,0.4)",background:"rgba(62,207,142,0.06)"},
+  box:{width:26,height:26,borderRadius:6,border:`2px solid ${C.sub}`,display:"flex",alignItems:"center",justifyContent:"center",color:"#1a1a1a",fontWeight:700,flexShrink:0,fontSize:16},
+  boxOn:{background:C.green,borderColor:C.green},
+  checkTxt:{fontSize:15,color:C.ink,fontWeight:500},
+  checkStamp:{fontSize:12,color:C.green,marginTop:4,fontWeight:600},
+  equipTag:{fontSize:10,letterSpacing:.5,color:C.amber,marginLeft:8,fontWeight:600,textTransform:"uppercase",border:`1px solid ${C.line}`,borderRadius:10,padding:"1px 7px"},
+  equipVals:{fontSize:12,color:C.sub,marginTop:3},
+  checkForm:{background:C.bg,border:`1px solid ${C.line}`,borderRadius:10,padding:14,marginTop:-2,marginBottom:2},
+  primaryBtn:{width:"100%",fontFamily:"'Oswald',sans-serif",letterSpacing:1,fontWeight:600,fontSize:15,background:C.amber,color:"#1a1a1a",border:"none",borderRadius:10,padding:"14px 0",cursor:"pointer",marginTop:12},
+  ghostBtn:{background:"transparent",border:"none",color:C.sub,cursor:"pointer",fontSize:14,fontWeight:600,padding:"8px 0"},
+  dangerBtn:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,background:"transparent",border:`1px solid ${C.red}`,color:C.red,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:600,flexShrink:0},
+  hint:{color:C.sub,fontSize:12,marginTop:12,lineHeight:1.5,fontStyle:"italic"},
+  noteFeed:{marginTop:22,display:"flex",flexDirection:"column",gap:14},
+  noNotes:{color:C.sub,fontSize:14,padding:"16px 0",textAlign:"center"},
+  noteCard:{background:C.panel,border:`1px solid ${C.line}`,borderRadius:12,padding:16,borderLeft:`4px solid ${C.line}`,marginBottom:12},
+  noteHead:{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6,gap:10,flexWrap:"wrap"},
+  noteAuthor:{fontFamily:"'Oswald',sans-serif",fontWeight:600,fontSize:16,letterSpacing:.5},
+  noteTs:{color:C.sub,fontSize:12},
+  noteBody:{fontSize:15,lineHeight:1.6,color:C.ink,whiteSpace:"pre-wrap"},
+  repProj:{fontSize:12,color:C.amber,fontWeight:600,letterSpacing:.5,marginBottom:8,fontFamily:"'Oswald',sans-serif"},
+  repCheck:{fontSize:14,color:C.ink,padding:"6px 0",borderTop:`1px solid ${C.line}`},
+  addendum:{background:C.bg,borderRadius:8,padding:"10px 12px",marginTop:10,borderLeft:`3px solid ${C.amber}`},
+  addHead:{fontSize:11,color:C.amber,fontWeight:600,letterSpacing:.5,marginBottom:4,fontFamily:"'Oswald',sans-serif"},
+  addBody:{fontSize:14,lineHeight:1.5,color:C.ink,whiteSpace:"pre-wrap"},
+  addForm:{marginTop:12,background:C.bg,padding:12,borderRadius:8},
+  formCard:{background:C.panel,border:`1px solid ${C.line}`,borderRadius:14,padding:18,marginBottom:8},
+  formRow:{display:"flex",gap:12,flexWrap:"wrap"},
+  numBox:{background:C.bg,border:`1px solid ${C.line}`,borderRadius:10,padding:"14px 14px 2px",marginBottom:14},
+  adminRow:{display:"flex",alignItems:"center",gap:12,background:C.panel,border:`1px solid ${C.line}`,borderRadius:10,padding:"14px 16px",marginBottom:10},
+  adminName:{fontFamily:"'Oswald',sans-serif",fontWeight:600,fontSize:17},
+  adminMeta:{color:C.sub,fontSize:13,marginTop:2},
+  adminAddr:{color:C.sub,fontSize:13},
+  numList:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6},
+  numChip:{fontSize:12,color:C.sub,background:C.bg,border:`1px solid ${C.line}`,borderRadius:6,padding:"3px 9px"},
+  reportStats:{display:"flex",gap:12,marginTop:6},
+  stat:{flex:1,background:C.bg,borderRadius:10,padding:"14px 10px",textAlign:"center",border:`1px solid ${C.line}`},
+  statN:{fontFamily:"'Oswald',sans-serif",fontSize:30,fontWeight:700,color:C.amber},
+  statL:{fontSize:11,color:C.sub,letterSpacing:.5,marginTop:2},
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
