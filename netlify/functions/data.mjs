@@ -7,7 +7,7 @@ import { getStore } from "@netlify/blobs";
 //  The browser never touches Blobs directly — it goes through here.
 // ------------------------------------------------------------------
 
-const COLLECTIONS = ["projects", "contractors", "entries", "employees", "procurement", "pto", "extras"];
+const COLLECTIONS = ["projects", "contractors", "entries", "employees", "procurement", "pto", "extras", "assignments"];
 
 const headers = {
   "Content-Type": "application/json",
