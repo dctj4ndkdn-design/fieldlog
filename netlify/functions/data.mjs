@@ -2,8 +2,8 @@ import { getStore } from "@netlify/blobs";
 
 // ------------------------------------------------------------------
 //  FIELDLOG data endpoint
-//  All app data lives in three "collections" inside one Blobs store:
-//    projects | contractors | entries
+//  All app data lives in collections inside one Blobs store:
+//    projects | contractors | entries | employees
 //  The browser never touches Blobs directly — it goes through here.
 // ------------------------------------------------------------------
 
@@ -16,15 +16,13 @@ const headers = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
-const json = (statusCode, body) => ({ statusCode, headers, body: JSON.stringify(body) });
-
 export default async (req) => {
-  // getStore MUST be called inside the handler (Netlify requirement)
-  const store = getStore({ name: "fieldlog", consistency: "strong" });
-
+  // Answer the CORS preflight FIRST — before touching the store.
   if (req.method === "OPTIONS") {
     return new Response("", { status: 204, headers });
   }
+
+  const store = getStore({ name: "fieldlog", consistency: "strong" });
 
   try {
     // ---- READ: return everything the app needs in one shot ----
@@ -36,7 +34,7 @@ export default async (req) => {
       return new Response(JSON.stringify(out), { status: 200, headers });
     }
 
-    // ---- WRITE: overwrite one collection with the array sent ----
+    // ---- WRITE ----
     if (req.method === "POST") {
       const body = await req.json();
       const { collection, data, upsert } = body || {};
@@ -48,9 +46,9 @@ export default async (req) => {
         );
       }
 
-      // ---- UPSERT one record by id (used by the CDM → Field Dog job push) ----
-      // Merges a single record into the existing array; never overwrites the
-      // whole collection, and preserves fields the record doesn't include.
+      // ---- UPSERT one record by id (CDM → Field Dog job push) ----
+      // Merges a single record into the array; never overwrites the whole
+      // collection, and preserves fields the record doesn't include.
       if (upsert && typeof upsert === "object" && !Array.isArray(upsert)) {
         if (!upsert.id) {
           return new Response(
@@ -58,30 +56,33 @@ export default async (req) => {
             { status: 400, headers }
           );
         }
-        const currentU = (await store.get(collection, { type: "json" })) || [];
-        const arrU = Array.isArray(currentU) ? currentU : [];
-        const idxU = arrU.findIndex((r) => r && r.id === upsert.id);
-        if (idxU >= 0) arrU[idxU] = { ...arrU[idxU], ...upsert };
-        else arrU.push(upsert);
-        await store.setJSON(collection, arrU);
+        const current = (await store.get(collection, { type: "json" })) || [];
+        const arr = Array.isArray(current) ? current : [];
+        const idx = arr.findIndex((r) => r && r.id === upsert.id);
+        if (idx >= 0) arr[idx] = { ...arr[idx], ...upsert };
+        else arr.push(upsert);
+        await store.setJSON(collection, arr);
         return new Response(
-          JSON.stringify({ ok: true, mode: "upsert", added: idxU < 0 }),
+          JSON.stringify({ ok: true, mode: "upsert", added: idx < 0 }),
           { status: 200, headers }
         );
       }
 
+      // ---- Overwrite one whole collection (normal app save) ----
       if (!Array.isArray(data)) {
         return new Response(
           JSON.stringify({ error: "data must be an array" }),
           { status: 400, headers }
         );
       }
-
       await store.setJSON(collection, data);
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers });
     }
 
-    return new Response(JSON.stringify({ error: "method not allowed" }), { status: 405, headers });
+    return new Response(
+      JSON.stringify({ error: "method not allowed" }),
+      { status: 405, headers }
+    );
   } catch (err) {
     return new Response(
       JSON.stringify({ error: String(err && err.message ? err.message : err) }),
