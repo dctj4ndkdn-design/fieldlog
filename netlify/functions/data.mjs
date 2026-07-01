@@ -7,7 +7,7 @@ import { getStore } from "@netlify/blobs";
 //  The browser never touches Blobs directly — it goes through here.
 // ------------------------------------------------------------------
 
-const COLLECTIONS = ["projects", "contractors", "entries", "employees"];
+const COLLECTIONS = ["projects", "contractors", "entries", "employees", "procurement", "pto", "extras", "assignments", "unscheduled"];
 
 const headers = {
   "Content-Type": "application/json",
@@ -127,4 +127,3 @@ export default async (req) => {
   }
 };
 
-export const config = { path: "/api/data" };
