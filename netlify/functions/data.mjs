@@ -7,7 +7,7 @@ import { getStore } from "@netlify/blobs";
 //  The browser never touches Blobs directly — it goes through here.
 // ------------------------------------------------------------------
 
-const COLLECTIONS = ["projects", "contractors", "entries", "employees", "procurement", "pto", "extras", "assignments", "unscheduled"];
+const COLLECTIONS = ["projects", "contractors", "entries", "employees"];
 
 const headers = {
   "Content-Type": "application/json",
@@ -39,7 +39,7 @@ export default async (req) => {
     // ---- WRITE: overwrite one collection with the array sent ----
     if (req.method === "POST") {
       const body = await req.json();
-      const { collection, data } = body || {};
+      const { collection, data, upsert } = body || {};
 
       if (!COLLECTIONS.includes(collection)) {
         return new Response(
@@ -47,6 +47,29 @@ export default async (req) => {
           { status: 400, headers }
         );
       }
+
+      // ---- UPSERT one record by id (used by the CDM → Field Dog job push) ----
+      // Merges a single record into the existing array; never overwrites the
+      // whole collection, and preserves fields the record doesn't include.
+      if (upsert && typeof upsert === "object" && !Array.isArray(upsert)) {
+        if (!upsert.id) {
+          return new Response(
+            JSON.stringify({ error: "upsert needs an id" }),
+            { status: 400, headers }
+          );
+        }
+        const currentU = (await store.get(collection, { type: "json" })) || [];
+        const arrU = Array.isArray(currentU) ? currentU : [];
+        const idxU = arrU.findIndex((r) => r && r.id === upsert.id);
+        if (idxU >= 0) arrU[idxU] = { ...arrU[idxU], ...upsert };
+        else arrU.push(upsert);
+        await store.setJSON(collection, arrU);
+        return new Response(
+          JSON.stringify({ ok: true, mode: "upsert", added: idxU < 0 }),
+          { status: 200, headers }
+        );
+      }
+
       if (!Array.isArray(data)) {
         return new Response(
           JSON.stringify({ error: "data must be an array" }),
