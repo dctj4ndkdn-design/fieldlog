@@ -59,8 +59,44 @@ export default async (req) => {
         const current = (await store.get(collection, { type: "json" })) || [];
         const arr = Array.isArray(current) ? current : [];
         const idx = arr.findIndex((r) => r && r.id === upsert.id);
-        if (idx >= 0) arr[idx] = { ...arr[idx], ...upsert };
-        else arr.push(upsert);
+        const prev = idx >= 0 ? arr[idx] : null;
+
+        // Pull bids out so we can reconcile them per-trade (preserving
+        // history) instead of blindly overwriting the whole bids object.
+        const { bids: incomingBids, ...rest } = upsert;
+        const merged = prev ? { ...prev, ...rest } : { ...rest };
+
+        if (incomingBids && typeof incomingBids === "object") {
+          const prevBids = (prev && prev.bids) || {};
+          const outBids = { ...prevBids };
+          const ts = new Date().toISOString();
+          for (const trade of Object.keys(incomingBids)) {
+            const newText = ((incomingBids[trade] || {}).current || "").trim();
+            if (!newText) continue; // don't seed/clobber with an empty note
+            const old = prevBids[trade] || { current: "", history: [] };
+            const oldText = (old.current || "").trim();
+            if (newText === oldText) { outBids[trade] = old; continue; }
+            const history = Array.isArray(old.history) ? old.history.slice() : [];
+            if (oldText) {
+              history.unshift({
+                id: "h_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7),
+                text: old.current,
+                by: "CDM",
+                ts,
+              });
+            }
+            outBids[trade] = {
+              current: (incomingBids[trade] || {}).current,
+              history: history.slice(0, 20),
+            };
+          }
+          merged.bids = outBids;
+        } else if (prev && prev.bids) {
+          merged.bids = prev.bids;
+        }
+
+        if (idx >= 0) arr[idx] = merged;
+        else arr.push(merged);
         await store.setJSON(collection, arr);
         return new Response(
           JSON.stringify({ ok: true, mode: "upsert", added: idx < 0 }),
@@ -91,3 +127,4 @@ export default async (req) => {
   }
 };
 
+export const config = { path: "/api/data" };
