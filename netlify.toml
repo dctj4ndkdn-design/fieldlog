@@ -2,11 +2,12 @@
   publish = "public"
   functions = "netlify/functions"
 
-# Let the function own /api/data — never fall through to the SPA
+# Send /api/data to the function by its internal name, before the SPA
 [[redirects]]
-  from = "/api/*"
-  to = "/api/:splat"
+  from = "/api/data"
+  to = "/.netlify/functions/data"
   status = 200
+  force = true
 
 # Single-page app: serve index.html for any route not matched
 [[redirects]]
