@@ -19,7 +19,7 @@ const headers = {
 export default async (req) => {
   // Answer the CORS preflight FIRST — before touching the store.
   if (req.method === "OPTIONS") {
-    return new Response("", { status: 204, headers });
+    return new Response("", { status: 200, headers });
   }
 
   const store = getStore({ name: "fieldlog", consistency: "strong" });
