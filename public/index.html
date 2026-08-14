@@ -119,7 +119,10 @@
 const { useState, useEffect, useCallback } = React;
 
 // =================== CONFIG ===================
-const OFFICE_PIN = "041990"; // change this value and redeploy to update the office PIN
+// OFFICE_PIN removed. The access code is now validated by the server
+// (netlify/functions/data.mjs) against the FD_FIELD_CODE / FD_OFFICE_CODE
+// environment variables. Never put a credential in this file again --
+// everything here is visible to anyone who views page source.
 const COMPANY_NAME = "DRG Mechanical, Inc."; // shown on printed reports
 
 const WORK_TYPES = ["Plumbing", "HVAC", "In-Floor"];
@@ -313,19 +316,83 @@ const CHECKLISTS = {
 
 // =================== DATA LAYER ===================
 const API = "/api/data";
+
+// ---- Access code ----
+// This is the real credential. The server validates it and decides what
+// this device may read and write; the browser only carries it. Stored per
+// device so nobody retypes it, and cleared automatically the moment the
+// server rejects it (e.g. after the codes are rotated).
+const CODE_KEY = "fielddog_code_v1";
+
+// localStorage is not always available (private browsing, blocked site data,
+// quota exceeded). Memory is the source of truth and storage is only a cache
+// -- otherwise a silent storage failure traps the user in the gate forever.
+let codeInMemory = "";
+const loadCode = () => {
+  if (codeInMemory) return codeInMemory;
+  try { codeInMemory = localStorage.getItem(CODE_KEY) || ""; } catch { codeInMemory = ""; }
+  return codeInMemory;
+};
+const saveCode  = (c) => { codeInMemory = c; try { localStorage.setItem(CODE_KEY, c); } catch {} };
+const clearCode = () => { codeInMemory = ""; try { localStorage.removeItem(CODE_KEY); } catch {} };
+
+// Kiosk support: the shop TV has no keyboard. Opening it once as
+//   https://<site>/?tv=1&code=<FIELD_CODE>
+// stores the code, then strips it back out of the URL and address bar so it
+// isn't left sitting in browser history.
+(function adoptCodeFromUrl() {
+  try {
+    const u = new URL(window.location.href);
+    const c = u.searchParams.get("code");
+    if (!c) return;
+    saveCode(c.trim());
+    u.searchParams.delete("code");
+    window.history.replaceState({}, "", u.toString());
+  } catch {}
+})();
+
+// Thrown when the server refuses the code, so callers can re-prompt
+// instead of showing a generic "couldn't reach the server" error.
+function AuthError(msg) { this.message = msg; }
+AuthError.prototype = Object.create(Error.prototype);
+
+const authHeaders = (extra) => {
+  const h = Object.assign({}, extra || {});
+  const code = loadCode();
+  if (code) h["Authorization"] = "Bearer " + code;
+  return h;
+};
+
 async function loadAll() {
-  const r = await fetch(API);
+  const r = await fetch(API, { headers: authHeaders() });
+  if (r.status === 401) throw new AuthError("code rejected");
   if (!r.ok) throw new Error("load failed (" + r.status + ")");
   return r.json();
 }
 async function saveCollection(collection, data) {
   const r = await fetch(API, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ collection, data }),
   });
+  if (r.status === 401) throw new AuthError("code rejected");
+  if (r.status === 403) throw new Error("This access code isn't allowed to change " + collection + ".");
   if (!r.ok) throw new Error("save failed (" + r.status + ")");
   return r.json();
+}
+
+// Ask the server whether a code is good, and what it is good for.
+// Returns "field", "office", or null. Does not store anything.
+async function checkCode(code) {
+  const r = await fetch(API, { headers: { "Authorization": "Bearer " + code } });
+  if (r.status === 401) return null;
+  if (!r.ok) {
+    let msg = "server error (" + r.status + ")";
+    try { const b = await r.json(); if (b && b.error) msg = b.error; } catch {}
+    throw new Error(msg);
+  }
+  const d = await r.json();
+  return d.tier || null;
 }
 
 // =================== HELPERS ===================
@@ -370,7 +437,10 @@ function App() {
   const [status, setStatus] = useState("loading");
   const [errMsg, setErrMsg] = useState("");
   const [side, setSide] = useState("field");
-  const [officeAuthed, setOfficeAuthed] = useState(false);
+  // What the server says this device's code is good for: "field" | "office" | null.
+  // The OFFICE side is unreachable unless the server itself says "office".
+  const [tier, setTier] = useState(null);
+  const [needCode, setNeedCode] = useState(() => !loadCode());
   const [syncing, setSyncing] = useState(false);
   // TV mode: detected from ?tv=1 in URL, OR toggled via in-app button
   const [tvMode, setTvMode] = useState(()=>{
@@ -391,8 +461,12 @@ function App() {
   const [printExtraId, setPrintExtraId] = useState(null);
 
   const refresh = useCallback(async () => {
+    // No code stored yet -- show the gate instead of calling the server.
+    if (!loadCode()) { setTier(null); setNeedCode(true); setStatus("ok"); return; }
     try {
       const d = await loadAll();
+      setTier(d.tier || null);
+      setNeedCode(false);
       setProjects(d.projects || []);
       setContractors(d.contractors || []);
       setEntries(d.entries || []);
@@ -403,14 +477,28 @@ function App() {
       setAssignments(d.assignments || []);
       setUnscheduled(d.unscheduled || []);
       setStatus("ok");
-    } catch (e) { setErrMsg(String(e.message || e)); setStatus("error"); }
+    } catch (e) {
+      // A rejected code is not a server outage -- drop it and re-prompt.
+      if (e instanceof AuthError) { clearCode(); setTier(null); setNeedCode(true); setStatus("ok"); return; }
+      setErrMsg(String(e.message || e)); setStatus("error");
+    }
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
 
   const persist = useCallback(async (collection, data, setter) => {
     setter(data); setSyncing(true);
     try { await saveCollection(collection, data); }
-    catch (e) { alert("Couldn't save to the server — reloading latest data.\n\n" + (e.message || e)); await refresh(); }
+    catch (e) {
+      if (e instanceof AuthError) {
+        clearCode(); setTier(null); setNeedCode(true);
+        // Say so. Otherwise the user re-enters their code, refresh() overwrites
+        // local state, and the thing they just submitted vanishes silently.
+        alert("Your access code was refused, so that did NOT save.\n\nEnter your code again, then re-enter what you just submitted.");
+      } else {
+        alert("Couldn't save to the server — reloading latest data.\n\n" + (e.message || e));
+      }
+      await refresh();
+    }
     finally { setSyncing(false); }
   }, [refresh]);
 
@@ -456,8 +544,15 @@ function App() {
       <div style={{color:"var(--red)",marginTop:16,fontWeight:600}}>Couldn't reach the server</div>
       <div style={S.loadSub}>{errMsg}</div>
       <button className="primary" style={{...S.primaryBtn,maxWidth:200,marginTop:18}} onClick={()=>{setStatus("loading");refresh();}}>RETRY</button>
+      {/* Without this, a stored code the server dislikes for any reason other
+          than 401 (503 misconfig, 500, edge error) is unclearable -- the sign-out
+          button lives in Header, which never renders on this screen. */}
+      <button style={{...S.primaryBtn,maxWidth:200,marginTop:10,background:"transparent",color:"var(--sub)",border:"1px solid var(--line)"}} onClick={()=>{clearCode();setTier(null);setNeedCode(true);setStatus("ok");}}>USE A DIFFERENT CODE</button>
     </div>
   );
+
+  // No usable code: nothing renders but the gate. No data has been fetched.
+  if (needCode) return <CodeGate onOk={(t)=>{ setTier(t); setNeedCode(false); setStatus("loading"); refresh(); }} />;
 
   // TV mode: full-screen calendar only, no app chrome
   if (tvMode) return (
@@ -477,71 +572,86 @@ function App() {
     />
   );
 
+  // Defence in depth: even if "office" were somehow selected without an
+  // office code, the server would refuse the data. Don't render the tab.
+  const isOffice = tier === "office";
+  const showOffice = side === "office" && isOffice;
+
   return (
     <div>
-      <Header side={side} setSide={setSide} authed={officeAuthed} resetAuth={()=>setOfficeAuthed(false)} syncing={syncing} onRefresh={refresh} />
-      {side==="field" ? (
+      <Header side={side} setSide={setSide} isOffice={isOffice} signOut={()=>{ clearCode(); setTier(null); setSide("field"); setNeedCode(true); }} syncing={syncing} onRefresh={refresh} />
+      {!showOffice ? (
         <FieldSide projects={projects.filter(p=>!p.removed)} entries={entries} saveEntries={saveEntries} employees={employees} contractors={contractors} procurement={procurement} saveProcurement={saveProcurement} pto={pto} savePto={savePto} extras={extras} saveExtras={saveExtras} printSingleExtra={printSingleExtra} assignments={assignments} onTvMode={()=>setTvMode(true)} />
-      ) : officeAuthed ? (
-        <OfficeSide projects={projects} saveProjects={saveProjects} contractors={contractors} saveContractors={saveContractors} entries={entries} saveEntries={saveEntries} employees={employees} saveEmployees={saveEmployees} procurement={procurement} saveProcurement={saveProcurement} pto={pto} savePto={savePto} extras={extras} saveExtras={saveExtras} printSingleExtra={printSingleExtra} printExtraId={printExtraId} assignments={assignments} saveAssignments={saveAssignments} unscheduled={unscheduled} saveUnscheduled={saveUnscheduled} />
       ) : (
-        <PinGate onUnlock={()=>setOfficeAuthed(true)} />
+        <OfficeSide projects={projects} saveProjects={saveProjects} contractors={contractors} saveContractors={saveContractors} entries={entries} saveEntries={saveEntries} employees={employees} saveEmployees={saveEmployees} procurement={procurement} saveProcurement={saveProcurement} pto={pto} savePto={savePto} extras={extras} saveExtras={saveExtras} printSingleExtra={printSingleExtra} printExtraId={printExtraId} assignments={assignments} saveAssignments={saveAssignments} unscheduled={unscheduled} saveUnscheduled={saveUnscheduled} />
       )}
       <SingleExtraPrint extras={extras} projects={projects} printExtraId={printExtraId} />
     </div>
   );
 }
 
-function Header({ side, setSide, authed, resetAuth, syncing, onRefresh }) {
+function Header({ side, setSide, isOffice, signOut, syncing, onRefresh }) {
   return (
     <header style={S.header}>
       <div style={S.brand}>FIELD<span style={{color:"var(--amber)"}}>DOG</span><span style={S.brandTag}>JOB TRACKING</span></div>
       <span title={syncing?"saving…":"synced"} className="syncdot" style={{background:syncing?"var(--amber)":"var(--green)"}} />
       <button className="lockbtn" style={{...S.lockBtn,padding:"8px 10px"}} onClick={onRefresh} title="Reload latest">⟳</button>
-      <div style={S.toggle}>
-        <button className="seg" onClick={()=>setSide("field")} style={{...S.segBtn,...(side==="field"?S.segOn:{})}}>FIELD</button>
-        <button className="seg" onClick={()=>setSide("office")} style={{...S.segBtn,...(side==="office"?S.segOn:{})}}>OFFICE</button>
-      </div>
-      {side==="office" && authed && <button className="lockbtn" style={S.lockBtn} onClick={resetAuth}>🔒</button>}
+      {isOffice && (
+        <div style={S.toggle}>
+          <button className="seg" onClick={()=>setSide("field")} style={{...S.segBtn,...(side==="field"?S.segOn:{})}}>FIELD</button>
+          <button className="seg" onClick={()=>setSide("office")} style={{...S.segBtn,...(side==="office"?S.segOn:{})}}>OFFICE</button>
+        </div>
+      )}
+      <button className="lockbtn" style={S.lockBtn} onClick={()=>{ if(window.confirm("Sign this device out?\n\nYou'll need the access code again to get back in.")) signOut(); }} title="Sign out of this device">🔒</button>
     </header>
   );
 }
 
-function PinGate({ onUnlock }) {
-  const [pin,setPin]=useState(""); const [err,setErr]=useState(false);
-  const press=(d)=>{
-    setErr(false);
-    if(d==="del")return setPin(p=>p.slice(0,-1));
-    if(d==="clr")return setPin("");
-    setPin(p=>{
-      if(p.length>=6) return p;
-      const next=p+d;
-      if(next===OFFICE_PIN){ setTimeout(onUnlock,150); }
-      else if(next.length>=OFFICE_PIN.length){ setErr(true); setTimeout(()=>setPin(""),400); }
-      return next;
-    });
+function CodeGate({ onOk }) {
+  const [code, setCode] = useState("");
+  const [err, setErr]   = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    if (e) e.preventDefault();
+    const c = code.trim();
+    if (!c || busy) return;
+    setBusy(true); setErr("");
+    try {
+      const t = await checkCode(c);
+      if (!t) { setErr("That access code wasn't accepted."); setCode(""); }
+      else { saveCode(c); onOk(t); }
+    } catch (ex) {
+      setErr(String((ex && ex.message) || ex));
+    } finally { setBusy(false); }
   };
-  // physical / on-screen keyboard support
-  useEffect(()=>{
-    const onKey=(e)=>{
-      if(e.key>="0" && e.key<="9"){ e.preventDefault(); press(e.key); }
-      else if(e.key==="Backspace"){ e.preventDefault(); press("del"); }
-      else if(e.key==="Escape"){ press("clr"); }
-    };
-    window.addEventListener("keydown",onKey);
-    return ()=>window.removeEventListener("keydown",onKey);
-  },[]);
+
   return (
     <div style={S.pinWrap}>
-      <div style={S.pinTitle}>OFFICE ACCESS</div>
-      <div style={S.pinSub}>Enter PIN — tap below or type on your keyboard</div>
-      <div style={{...S.pinDots,...(err?{animation:"shake .35s"}:{})}}>
-        {[0,1,2,3,4,5].map(i=><span key={i} style={{...S.dot,...(i<pin.length?S.dotOn:{}),...(i<OFFICE_PIN.length||i<pin.length?{}:{opacity:.25})}} />)}
-      </div>
-      {err && <div style={S.pinErr}>Incorrect PIN</div>}
-      <div style={S.pad}>
-        {["1","2","3","4","5","6","7","8","9","clr","0","del"].map(k=>
-          <button key={k} className="padkey" style={S.padKey} onClick={()=>press(k)}>{k==="del"?"⌫":k==="clr"?"C":k}</button>)}
+      <div style={S.loadMark}>FIELD<span style={{color:"var(--amber)"}}>DOG</span></div>
+      <div style={{...S.pinTitle, marginTop:24}}>ACCESS CODE</div>
+      <div style={S.pinSub}>Enter your code once — this device will remember it.</div>
+      <form onSubmit={submit}>
+        <input
+          style={S.input}
+          type="password"
+          inputMode="text"
+          autoFocus
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          value={code}
+          onChange={(e)=>{ setCode(e.target.value); setErr(""); }}
+          placeholder="access code"
+        />
+        {err && <div style={{...S.pinErr, marginTop:12}}>{err}</div>}
+        <button className="primary" style={S.primaryBtn} type="submit" disabled={busy}>
+          {busy ? "CHECKING…" : "ENTER"}
+        </button>
+      </form>
+      <div style={{...S.pinSub, marginTop:24, marginBottom:0, fontSize:12}}>
+        Don't have a code? Ask the office.
       </div>
     </div>
   );
