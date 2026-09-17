@@ -814,6 +814,7 @@ function Workspace({ project, back, entries, saveEntries, employees, contractors
           {key:"checklist", label:"CHECKLIST"},
           {key:"notes", label:"NOTES"},
           {key:"procurement", label:"MATERIALS"},
+          {key:"billed", label:"BILLED"},
           {key:"extras", label:"EXTRAS"},
           {key:"bid", label:"BID"},
         ]}
@@ -824,11 +825,86 @@ function Workspace({ project, back, entries, saveEntries, employees, contractors
         ? <Notes project={project} trade={trade} entries={entries} saveEntries={saveEntries} employees={employees} />
         : tab==="procurement"
         ? <FieldProcurement project={project} trade={trade} procurement={procurement} saveProcurement={saveProcurement} employees={employees} />
+        : tab==="billed"
+        ? <FieldBilled project={project} trade={trade} />
         : tab==="extras"
         ? <FieldExtras project={project} trade={trade} extras={extras} saveExtras={saveExtras} employees={employees} printSingleExtra={printSingleExtra} />
         : <FieldBid project={project} trade={trade} />}
     </main>
   );
+}
+
+// ---- Field-side BILLED viewer (read-only) ----
+//
+// What has gone out the door on this job: which parts, on which draw, on what
+// date. Pushed from the Draw Manager and rendered here; the field never edits it.
+//
+// ⚠️ THERE IS DELIBERATELY NO MONEY ON THIS SCREEN. Not a unit cost, not a draw
+// total, not a contract value. That is a decision (Bryan, 16 Sep) recorded in
+// ACE-fielddog-cdm-permission-model-for-postgres.md §B, and the Draw Manager
+// does not even send those fields. If someone later asks for "just the draw
+// total", that is a decision to re-make, not a small addition -- a total beside
+// its own material list gives up the margin.
+//
+// Named BILLED, not "materials", because this tab sits next to MATERIALS
+// (procurement) which means the opposite thing: what the field is ASKING FOR.
+function FieldBilled({ project, trade }) {
+  const billing = project.billing || null;
+  const tradeBlk = billing && (billing.trades||[]).find(t=>t.label===trade);
+  const draws = (tradeBlk && tradeBlk.draws) || [];
+  // Newest first -- the usual question is "did the last one include X".
+  const ordered = draws.slice().reverse();
+  const asOf = billing && billing.asOf ? fmtAsOf(billing.asOf) : null;
+  return (
+    <div>
+      <SectionTitle>{trade.toUpperCase()} BILLED</SectionTitle>
+      {ordered.length===0 ? (
+        <div style={S.noNotes}>
+          {billing
+            ? `Nothing billed yet on ${trade}.`
+            : "No billing information has been sent for this job yet. Ask the office to push it from the Draw Manager."}
+        </div>
+      ) : ordered.map(d=>(
+        <div key={`${d.n}-${d.date}-${d.job}`} style={S.billedDraw}>
+          <div style={S.billedHead}>
+            <span style={S.billedNum}>DRAW {d.n}</span>
+            <span style={S.billedDate}>{fmtBilledDate(d.date)}</span>
+            {d.job ? <span style={S.billedJob}>Job #{d.job}</span> : null}
+          </div>
+          {(d.materials||[]).length===0 ? (
+            <div style={S.billedNone}>No parts listed on this draw.</div>
+          ) : (
+            <div>
+              {(d.materials||[]).map((m,i)=>(
+                <div key={i} style={S.billedRow}>
+                  <span style={S.billedQty}>{m.qty}</span>
+                  <span style={S.billedDash}>&mdash;</span>
+                  <span style={S.billedName}>{m.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      {asOf && <p style={S.hint}>As of {asOf}. The office updates this from the Draw Manager &mdash; if a recent draw is missing, it has not been pushed across yet.</p>}
+    </div>
+  );
+}
+
+// YYYY-MM-DD is what the Draw Manager stores. Parse at noon so a timezone shift
+// can never roll the date back a day.
+function fmtBilledDate(d){
+  if(!d) return "\u2014";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d));
+  if(!m) return String(d);
+  return `${Number(m[2])}/${Number(m[3])}/${m[1]}`;
+}
+function fmtAsOf(iso){
+  try{
+    const dt = new Date(iso);
+    if(isNaN(dt.getTime())) return null;
+    return dt.toLocaleString(undefined,{month:"numeric",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"});
+  }catch(e){ return null; }
 }
 
 // ---- Field-side bid viewer (read-only) ----
@@ -4873,6 +4949,16 @@ const S={
   unschedCard:{display:"flex",gap:14,alignItems:"flex-start",background:C.panel,border:`1px dashed ${C.amber}`,borderRadius:10,padding:"12px 14px",marginBottom:10},
   unschedName:{fontFamily:"'Oswald',sans-serif",fontSize:15,fontWeight:600,letterSpacing:.3,color:C.ink},
   // Bid editor + viewer
+  billedDraw:{background:C.panel,border:`1px solid ${C.line}`,borderRadius:10,padding:"12px 14px",marginBottom:12},
+  billedHead:{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:8,paddingBottom:8,borderBottom:`1px dashed ${C.line}`},
+  billedNum:{fontFamily:"'Oswald',sans-serif",fontSize:13,letterSpacing:1.2,color:C.amber,fontWeight:700},
+  billedDate:{fontSize:13,color:C.ink,fontWeight:600},
+  billedJob:{fontSize:12,color:C.sub},
+  billedRow:{display:"flex",alignItems:"baseline",gap:8,padding:"3px 0",fontSize:14},
+  billedQty:{color:C.amber,fontWeight:700,minWidth:28,textAlign:"right"},
+  billedDash:{color:C.sub},
+  billedName:{color:C.ink,flex:1},
+  billedNone:{color:C.sub,fontSize:13,fontStyle:"italic",padding:"2px 0"},
   bidsSection:{marginTop:14,paddingTop:14,borderTop:`1px dashed ${C.line}`},
   bidsSectionHead:{fontFamily:"'Oswald',sans-serif",fontSize:13,letterSpacing:1.5,color:C.amber,fontWeight:700,marginBottom:10,textTransform:"uppercase"},
   bidBlock:{marginBottom:18},
