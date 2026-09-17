@@ -2469,7 +2469,7 @@ function OfficeSide({ projects, saveProjects, contractors, saveContractors, entr
           {key:"backup", label:"BACKUP"},
         ]}
       />
-      {tab==="projects" && <ProjectsAdmin projects={projects} saveProjects={saveProjects} contractors={contractors} entries={entries} saveEntries={saveEntries} employees={employees} />}
+      {tab==="projects" && <ProjectsAdmin projects={projects} saveProjects={saveProjects} contractors={contractors} entries={entries} saveEntries={saveEntries} employees={employees} procurement={procurement} saveProcurement={saveProcurement} extras={extras} saveExtras={saveExtras} assignments={assignments} saveAssignments={saveAssignments} />}
       {tab==="contractors" && <ContractorsAdmin contractors={contractors} saveContractors={saveContractors} />}
       {tab==="employees" && <EmployeesAdmin employees={employees} saveEmployees={saveEmployees} />}
       {tab==="procurement" && <OfficeProcurement projects={projects} procurement={procurement} saveProcurement={saveProcurement} employees={employees} />}
@@ -2644,7 +2644,59 @@ function OfficeChecklistView({ project, entries, saveEntries, employees }) {
   );
 }
 
-function ProjectsAdmin({ projects, saveProjects, contractors, entries, saveEntries, employees }) {
+// ---- Merging two projects ----
+//
+// Why this exists: a job can get written up in Field Dog by hand AND pushed from
+// the Draw Manager, leaving two records for one job with the field's work split
+// across them.
+//
+// ⚠️ DIRECTION MATTERS, and it is not symmetric. The Draw Manager pushes using
+// its OWN job id (`job_...`) and will keep doing so forever. So if you keep the
+// hand-made record and remove the pushed one, the very next push recreates the
+// duplicate. **The Draw-Manager-pushed record must be the survivor.**
+const isCdmProject = (p) => !!(p && typeof p.id === "string" && p.id.indexOf("job_") === 0);
+
+// Four collections carry projectId. Missing one silently orphans that data,
+// so this list is the single source of truth for the merge.
+const MERGE_COLLECTIONS = ["entries", "procurement", "extras", "assignments"];
+
+// What would move, without moving anything. Used for the preview AND the merge,
+// so the number shown is the number that happens.
+function mergeImpact(sourceId, bundle){
+  const out = {};
+  let total = 0;
+  MERGE_COLLECTIONS.forEach(k=>{
+    const n = (bundle[k]||[]).filter(r=>r && r.projectId===sourceId).length;
+    out[k] = n; total += n;
+  });
+  out.total = total;
+  return out;
+}
+
+// Trades the moved rows actually reference. If the survivor does not offer one
+// of these, that data lands on the project but is invisible -- so the survivor's
+// workTypes get the union, not its own list.
+function tradesInUse(sourceId, bundle){
+  const set = {};
+  MERGE_COLLECTIONS.forEach(k=>{
+    (bundle[k]||[]).forEach(r=>{ if(r && r.projectId===sourceId && r.trade) set[r.trade]=true; });
+  });
+  return Object.keys(set);
+}
+
+// The merged survivor. The survivor wins every scalar (the Draw Manager is
+// authoritative for the job header); workTypes and projectNumbers are unioned so
+// nothing moved becomes unreachable.
+function mergedProject(target, source, sourceId, bundle){
+  const wt = (target.workTypes||[]).slice();
+  const need = tradesInUse(sourceId, bundle).concat(source.workTypes||[]);
+  need.forEach(w=>{ if(w && wt.indexOf(w)<0) wt.push(w); });
+  const nums = { ...(source.projectNumbers||{}), ...(target.projectNumbers||{}) };
+  const bids = { ...(source.bids||{}), ...(target.bids||{}) };
+  return { ...target, workTypes: wt, projectNumbers: nums, bids: bids };
+}
+
+function ProjectsAdmin({ projects, saveProjects, contractors, entries, saveEntries, employees, procurement, saveProcurement, extras, saveExtras, assignments, saveAssignments }) {
   const blank={ name:"", address:"", contractor:"", workTypes:[], projectNumbers:{}, bids:{} };
   const [form,setForm]=useState(blank);
   const [editingId,setEditingId]=useState(null); // null = creating
@@ -2753,6 +2805,44 @@ function ProjectsAdmin({ projects, saveProjects, contractors, entries, saveEntri
   };
 
   const remove=(id)=>{ if(!confirm("Remove this project? It moves to the Removed list (data kept).")) return; saveProjects(projects.map(p=>p.id===id?{...p,removed:true}:p)); if(editingId===id) resetForm(); };
+
+  // ---- Merge ----
+  const [mergeSourceId,setMergeSourceId]=useState(null);   // the record that folds in and goes away
+  const [mergeTargetId,setMergeTargetId]=useState("");     // the survivor
+  const bundle = { entries, procurement, extras, assignments };
+
+  const doMerge=()=>{
+    const source = projects.find(p=>p.id===mergeSourceId);
+    const target = projects.find(p=>p.id===mergeTargetId);
+    if(!source || !target || source.id===target.id) return;
+    const impact = mergeImpact(source.id, bundle);
+    const warn = (!isCdmProject(target) && isCdmProject(source))
+      ? "\n\n\u26a0 You are keeping the hand-made record and removing the one the Draw Manager pushed. The next push from the Draw Manager will CREATE THE DUPLICATE AGAIN. Keeping the pushed record instead avoids that."
+      : "";
+    if(!confirm(
+      "Merge \u201c"+(source.name||"untitled")+"\u201d into \u201c"+(target.name||"untitled")+"\u201d?\n\n"+
+      "Moving: "+impact.entries+" checklist/note records, "+impact.procurement+" material requests, "+
+      impact.extras+" extras, "+impact.assignments+" schedule entries.\n\n"+
+      "\u201c"+(source.name||"untitled")+"\u201d then moves to the Removed list. Nothing is deleted."+warn
+    )) return;
+
+    // Repoint first, remove second. If anything goes wrong between the two the
+    // data is already safe on the survivor; the worst case is a leftover empty
+    // project, not lost work.
+    const repoint = (rows) => (rows||[]).map(r => (r && r.projectId===source.id) ? { ...r, projectId: target.id } : r);
+    if(impact.entries)      saveEntries(repoint(entries));
+    if(impact.procurement)  saveProcurement(repoint(procurement));
+    if(impact.extras)       saveExtras(repoint(extras));
+    if(impact.assignments)  saveAssignments(repoint(assignments));
+
+    const merged = mergedProject(target, source, source.id, bundle);
+    saveProjects(projects.map(p =>
+      p.id===target.id ? merged :
+      p.id===source.id ? { ...p, removed:true } : p));
+
+    setMergeSourceId(null); setMergeTargetId("");
+    alert("\u2713 Merged. "+impact.total+" record(s) moved to \u201c"+(target.name||"untitled")+"\u201d.");
+  };
   const restore=(id)=> saveProjects(projects.map(p=>p.id===id?{...p,removed:false}:p));
 
   return (
@@ -2859,9 +2949,50 @@ function ProjectsAdmin({ projects, saveProjects, contractors, entries, saveEntri
                 {viewingChecklistsId===p.id?"CLOSE":"CHECKLISTS"}
               </button>
               <button className="ghost" style={S.editBtn} onClick={()=>startEdit(p)}>EDIT</button>
+              <button className="ghost" style={S.editBtn} onClick={()=>{setMergeSourceId(mergeSourceId===p.id?null:p.id);setMergeTargetId("");}}>
+                {mergeSourceId===p.id?"CANCEL":"MERGE"}
+              </button>
               <button className="danger" style={S.dangerBtn} onClick={()=>remove(p.id)}>REMOVE</button>
             </div>
           </div>
+          {mergeSourceId===p.id && (()=>{
+            const impact = mergeImpact(p.id, bundle);
+            const others = projects.filter(x=>!x.removed && x.id!==p.id);
+            const target = projects.find(x=>x.id===mergeTargetId);
+            return (
+              <div style={S.mergeBox}>
+                <div style={S.mergeHead}>MERGE &ldquo;{p.name||"untitled"}&rdquo; INTO ANOTHER JOB</div>
+                <div style={S.mergeBody}>
+                  This job keeps nothing &mdash; its {impact.total} record(s) move to the job you pick,
+                  and it goes to the Removed list. <strong>Nothing is deleted.</strong>
+                </div>
+                <div style={S.mergeCounts}>
+                  {impact.entries} checklist/notes &middot; {impact.procurement} material requests &middot; {impact.extras} extras &middot; {impact.assignments} schedule
+                </div>
+                <select style={S.input} value={mergeTargetId} onChange={e=>setMergeTargetId(e.target.value)}>
+                  <option value="">&mdash; keep which job? &mdash;</option>
+                  {others.map(x=>(
+                    <option key={x.id} value={x.id}>
+                      {x.name||"untitled"}{isCdmProject(x)?"  (from Draw Manager)":"  (created here)"}
+                    </option>
+                  ))}
+                </select>
+                {target && !isCdmProject(target) && isCdmProject(p) && (
+                  <div style={S.mergeWarn}>
+                    &#9888; You are keeping the hand-made job and removing the one the Draw Manager pushed.
+                    <strong> The next push will recreate this duplicate.</strong> Keep the Draw Manager job instead.
+                  </div>
+                )}
+                {target && isCdmProject(target) && (
+                  <div style={S.mergeOk}>
+                    &#10003; Keeping the Draw Manager job &mdash; future pushes will land here.
+                  </div>
+                )}
+                <button className="primary" style={{...S.primaryBtn, opacity: mergeTargetId?1:0.4}}
+                        disabled={!mergeTargetId} onClick={doMerge}>MERGE</button>
+              </div>
+            );
+          })()}
           {viewingChecklistsId===p.id && (
             <OfficeChecklistView project={p} entries={entries} saveEntries={saveEntries} employees={employees} />
           )}
@@ -4959,6 +5090,12 @@ const S={
   billedDash:{color:C.sub},
   billedName:{color:C.ink,flex:1},
   billedNone:{color:C.sub,fontSize:13,fontStyle:"italic",padding:"2px 0"},
+  mergeBox:{background:C.panel2,border:`1px solid ${C.line}`,borderRadius:10,padding:"14px 16px",marginTop:10},
+  mergeHead:{fontFamily:"'Oswald',sans-serif",fontSize:13,letterSpacing:1.2,color:C.amber,fontWeight:700,marginBottom:8},
+  mergeBody:{fontSize:13,color:C.ink,lineHeight:1.5,marginBottom:8},
+  mergeCounts:{fontSize:12,color:C.sub,marginBottom:10},
+  mergeWarn:{fontSize:12.5,color:C.red,background:"rgba(229,72,77,0.10)",border:`1px solid ${C.red}`,borderRadius:8,padding:"8px 10px",margin:"10px 0",lineHeight:1.45},
+  mergeOk:{fontSize:12.5,color:C.green,margin:"10px 0",lineHeight:1.45},
   bidsSection:{marginTop:14,paddingTop:14,borderTop:`1px dashed ${C.line}`},
   bidsSectionHead:{fontFamily:"'Oswald',sans-serif",fontSize:13,letterSpacing:1.5,color:C.amber,fontWeight:700,marginBottom:10,textTransform:"uppercase"},
   bidBlock:{marginBottom:18},
