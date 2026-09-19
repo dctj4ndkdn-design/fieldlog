@@ -1839,6 +1839,31 @@ const OFFICE_EXTRA_STATUS = {
   declined: { label:"DECLINED",         tone:"red",   note:"Not approved — do not do this work." },
 };
 
+// An OPTION is not an extra and must not read like one.
+//
+// The Draw Manager's extra form has a Type dropdown — Extra / Option / Allowance
+// / Deduct — and `option` is the BIGGEST category in the real data: 97 of 180.
+// An option is something the customer may or may not have bought (a humidifier,
+// a garage heater, an ERV), so the useful word is ACCEPTED, not "approved", and
+// the dangerous state is a crew installing one the customer never took.
+//
+// ⚠️ These are NOT the bid options on the job-setup screen. Those are a separate
+// thing, live on the trade as `bidOptions`, and render on the BID tab via
+// AcceptedOption(). Both exist; do not merge them.
+const OFFICE_OPTION_STATUS = {
+  pending:  { label:"NOT DECIDED YET", tone:"sub",   note:"The customer has not taken this yet — do not install it." },
+  approved: { label:"ACCEPTED",        tone:"green", note:"Customer took this — it is part of the job." },
+  billed:   { label:"ACCEPTED",        tone:"green", note:"Customer took this — it is part of the job." },
+  paid:     { label:"ACCEPTED",        tone:"green", note:"Customer took this — it is part of the job." },
+  declined: { label:"DECLINED",        tone:"red",   note:"Customer passed on this — do not install it." },
+};
+
+// Shown as a small tag on the non-option rows. `extra` gets none — it is the
+// default and a tag saying "Extra" under a heading saying EXTRAS is noise.
+const OFFICE_EXTRA_TYPE_TAG = { allowance:"Allowance", deduct:"Credit" };
+
+const isOptionType = (x) => String((x && x.type) || "extra").toLowerCase() === "option";
+
 // ---- Extras written up by the office (read-only) ----
 //
 // ⚠️ NO MONEY. Description, date, status, parts and hours only. The Draw
@@ -1848,46 +1873,63 @@ const OFFICE_EXTRA_STATUS = {
 // The office is the only place an extra gets written up (Bryan, 19 Sep). The
 // crews hand in paper and he enters it; this screen is where they see that it
 // landed and whether the GC approved it.
+function OfficeExtraRow({ x, statusTable }) {
+  const st = statusTable[String(x.status||"").toLowerCase()] || statusTable.pending;
+  const tone = C[st.tone] || C.sub;
+  const tag = OFFICE_EXTRA_TYPE_TAG[String(x.type||"").toLowerCase()];
+  return (
+    <div style={S.officeExtra}>
+      <div style={S.officeExtraHead}>
+        <span style={{...S.officeExtraStatus, color:tone, borderColor:tone}}>{st.label}</span>
+        {tag ? <span style={S.officeExtraTag}>{tag}</span> : null}
+        <span style={S.billedDate}>{fmtBilledDate(x.date)}</span>
+      </div>
+      <div style={S.officeExtraDesc}>{x.desc}</div>
+      {st.note ? <div style={{...S.officeExtraNote, color:tone}}>{st.note}</div> : null}
+      {(x.materials||[]).length > 0 && (
+        <div style={{marginTop:8}}>
+          {(x.materials||[]).map((m,k)=>(
+            <div key={k} style={S.billedRow}>
+              <span style={S.billedQty}>{m.qty}</span>
+              <span style={S.billedDash}>&mdash;</span>
+              <span style={S.billedName}>{m.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {x.hours > 0 && <div style={S.officeExtraHours}>{x.hours} hr logged</div>}
+    </div>
+  );
+}
+
 function OfficeExtrasView({ project, trade }) {
   const blk = officeBlockFor(project, trade);
   const list = (blk && blk.extras) || [];
   // Newest first -- the live question is almost always about the last one.
   const ordered = list.slice().reverse();
+  const options = ordered.filter(isOptionType);
+  const extras  = ordered.filter(x=>!isOptionType(x));
   const asOf = project.office && project.office.asOf ? fmtAsOf(project.office.asOf) : null;
   if(!project.office){
     return <div style={S.noNotes}>No extras have been sent for this job yet. Ask the office to push it from the Draw Manager.</div>;
   }
   if(ordered.length===0){
-    return <div style={S.noNotes}>No extras written up on this {trade} scope yet.</div>;
+    return <div style={S.noNotes}>Nothing written up on this {trade} scope yet.</div>;
   }
   return (
     <div>
-      {ordered.map((x,i)=>{
-        const st = OFFICE_EXTRA_STATUS[String(x.status||"").toLowerCase()] || OFFICE_EXTRA_STATUS.pending;
-        const tone = C[st.tone] || C.sub;
-        return (
-          <div key={i} style={S.officeExtra}>
-            <div style={S.officeExtraHead}>
-              <span style={{...S.officeExtraStatus, color:tone, borderColor:tone}}>{st.label}</span>
-              <span style={S.billedDate}>{fmtBilledDate(x.date)}</span>
-            </div>
-            <div style={S.officeExtraDesc}>{x.desc}</div>
-            {st.note ? <div style={{...S.officeExtraNote, color:tone}}>{st.note}</div> : null}
-            {(x.materials||[]).length > 0 && (
-              <div style={{marginTop:8}}>
-                {(x.materials||[]).map((m,k)=>(
-                  <div key={k} style={S.billedRow}>
-                    <span style={S.billedQty}>{m.qty}</span>
-                    <span style={S.billedDash}>&mdash;</span>
-                    <span style={S.billedName}>{m.name}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-            {x.hours > 0 && <div style={S.officeExtraHours}>{x.hours} hr logged</div>}
-          </div>
-        );
-      })}
+      {options.length > 0 && (
+        <div style={{marginBottom:18}}>
+          <SectionTitle>{trade.toUpperCase()} OPTIONS</SectionTitle>
+          {options.map((x,i)=><OfficeExtraRow key={"o"+i} x={x} statusTable={OFFICE_OPTION_STATUS} />)}
+        </div>
+      )}
+      {extras.length > 0 && (
+        <div>
+          <SectionTitle>{trade.toUpperCase()} EXTRAS</SectionTitle>
+          {extras.map((x,i)=><OfficeExtraRow key={"e"+i} x={x} statusTable={OFFICE_EXTRA_STATUS} />)}
+        </div>
+      )}
       {asOf && <p style={S.hint}>As of {asOf}. The office writes these up in the Draw Manager &mdash; if one you handed in is missing, it has not been entered yet.</p>}
     </div>
   );
@@ -5243,6 +5285,7 @@ const S={
   officeExtra:{background:C.panel,border:`1px solid ${C.line}`,borderRadius:12,padding:"14px 16px",marginBottom:10},
   officeExtraHead:{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"},
   officeExtraStatus:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,fontSize:11,fontWeight:600,border:"1px solid",borderRadius:99,padding:"2px 10px"},
+  officeExtraTag:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,fontSize:10,fontWeight:600,color:C.sub,border:`1px solid ${C.line}`,borderRadius:99,padding:"2px 8px"},
   officeExtraDesc:{fontSize:15,color:C.ink,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"},
   officeExtraNote:{fontSize:12,marginTop:6,fontWeight:600},
   officeExtraHours:{fontSize:13,color:C.sub,marginTop:8},
