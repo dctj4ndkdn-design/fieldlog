@@ -907,6 +907,56 @@ function fmtAsOf(iso){
   }catch(e){ return null; }
 }
 
+// The office block the Draw Manager pushes: bid options and extras per trade.
+// Returns null when nothing has been pushed for this trade -- which is NOT the
+// same as "pushed, and there are none". The first should stay quiet; the second
+// is worth saying out loud.
+function officeBlockFor(project, trade){
+  const off = project.office || null;
+  if(!off) return null;
+  return (off.trades||[]).find(t=>t.label===trade) || null;
+}
+
+// ---- Which bid option the office accepted (read-only) ----
+//
+// ⚠️ NO AMOUNTS HERE, BY DESIGN. The Draw Manager does not send them. The field
+// needs to know WHICH scope was accepted and WHETHER it was accepted at all --
+// not what it is worth. Same rule as the BILLED tab (§7.17 of the ACE ledger).
+function AcceptedOption({ project, trade }) {
+  const blk = officeBlockFor(project, trade);
+  const options = (blk && blk.options) || [];
+  if(!options.length) return null;
+  const accepted = options.filter(o=>o.accepted);
+  const others   = options.filter(o=>!o.accepted);
+  return (
+    <div style={S.optionBox}>
+      {accepted.length > 0 ? (
+        accepted.map((o,i)=>(
+          <div key={i} style={S.optionAccepted}>
+            <span style={S.optionTick}>&#10003;</span>
+            <span>ACCEPTED{o.name ? <span style={S.optionName}> &mdash; {o.name}</span> : null}</span>
+          </div>
+        ))
+      ) : (
+        // 28 of the 94 options in the real data sit in this state. A crew that
+        // starts an unaccepted scope is doing work nobody has agreed to pay for.
+        <div style={S.optionPending}>
+          NOT ACCEPTED YET &mdash; check with the office before starting this scope.
+        </div>
+      )}
+      {others.length > 0 && (
+        <div style={S.optionOthers}>
+          {others.map((o,i)=>(
+            <div key={i} style={S.optionOther}>
+              {o.declined ? "Declined" : "Not selected"}{o.name ? ` — ${o.name}` : ""}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---- Field-side bid viewer (read-only) ----
 function FieldBid({ project, trade }) {
   const bidObj = ((project.bids||{})[trade]) || { current:"", history:[] };
@@ -916,6 +966,7 @@ function FieldBid({ project, trade }) {
   return (
     <div>
       <SectionTitle>{trade.toUpperCase()} BID</SectionTitle>
+      <AcceptedOption project={project} trade={trade} />
       {!current ? (
         <div style={S.noNotes}>No bid posted yet for {trade}. Ask the office to paste it in.</div>
       ) : (
@@ -1772,28 +1823,94 @@ function FieldProcurement({ project, trade, procurement, saveProcurement, employ
 }
 
 
+// How a Draw Manager extra status reads to someone standing on the job.
+// "approved" and "declined" are the two that decide whether work happens, which
+// is the whole reason these come across at all.
+//
+// ⚠️ `tone` is a KEY INTO C, not a colour. C is declared near the bottom of this
+// file, and a top-level const that reads C in its own initialiser throws a
+// ReferenceError before a single component renders -- the whole app white-screens
+// on load. Resolve the colour inside the component, where C definitely exists.
+const OFFICE_EXTRA_STATUS = {
+  pending:  { label:"PENDING APPROVAL", tone:"sub",   note:"Not approved yet — check with the office before doing this." },
+  approved: { label:"APPROVED",         tone:"green", note:"Approved — OK to do." },
+  billed:   { label:"BILLED",           tone:"green", note:"" },
+  paid:     { label:"BILLED",           tone:"green", note:"" },
+  declined: { label:"DECLINED",         tone:"red",   note:"Not approved — do not do this work." },
+};
+
+// ---- Extras written up by the office (read-only) ----
+//
+// ⚠️ NO MONEY. Description, date, status, parts and hours only. The Draw
+// Manager holds the amount, the cost and the margin and does not send any of
+// them.
+//
+// The office is the only place an extra gets written up (Bryan, 19 Sep). The
+// crews hand in paper and he enters it; this screen is where they see that it
+// landed and whether the GC approved it.
+function OfficeExtrasView({ project, trade }) {
+  const blk = officeBlockFor(project, trade);
+  const list = (blk && blk.extras) || [];
+  // Newest first -- the live question is almost always about the last one.
+  const ordered = list.slice().reverse();
+  const asOf = project.office && project.office.asOf ? fmtAsOf(project.office.asOf) : null;
+  if(!project.office){
+    return <div style={S.noNotes}>No extras have been sent for this job yet. Ask the office to push it from the Draw Manager.</div>;
+  }
+  if(ordered.length===0){
+    return <div style={S.noNotes}>No extras written up on this {trade} scope yet.</div>;
+  }
+  return (
+    <div>
+      {ordered.map((x,i)=>{
+        const st = OFFICE_EXTRA_STATUS[String(x.status||"").toLowerCase()] || OFFICE_EXTRA_STATUS.pending;
+        const tone = C[st.tone] || C.sub;
+        return (
+          <div key={i} style={S.officeExtra}>
+            <div style={S.officeExtraHead}>
+              <span style={{...S.officeExtraStatus, color:tone, borderColor:tone}}>{st.label}</span>
+              <span style={S.billedDate}>{fmtBilledDate(x.date)}</span>
+            </div>
+            <div style={S.officeExtraDesc}>{x.desc}</div>
+            {st.note ? <div style={{...S.officeExtraNote, color:tone}}>{st.note}</div> : null}
+            {(x.materials||[]).length > 0 && (
+              <div style={{marginTop:8}}>
+                {(x.materials||[]).map((m,k)=>(
+                  <div key={k} style={S.billedRow}>
+                    <span style={S.billedQty}>{m.qty}</span>
+                    <span style={S.billedDash}>&mdash;</span>
+                    <span style={S.billedName}>{m.name}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {x.hours > 0 && <div style={S.officeExtraHours}>{x.hours} hr logged</div>}
+          </div>
+        );
+      })}
+      {asOf && <p style={S.hint}>As of {asOf}. The office writes these up in the Draw Manager &mdash; if one you handed in is missing, it has not been entered yet.</p>}
+    </div>
+  );
+}
+
 // ---- Extras (field side: per-job per-trade extras) ----
+//
+// ⚠️ THE FIELD NO LONGER CREATES EXTRAS HERE (Bryan, 19 Sep). They were not
+// being created anyway -- the crews hand in paper and Bryan writes them up in
+// the Draw Manager -- and a + NEW EXTRA button that still worked would be worse
+// than no button: it would write a record into the one place Bryan never looks,
+// which is strictly worse than the paper it replaced.
+//
+// Extras already started in this app are deliberately left fully editable. Some
+// carry time entries someone still has to close out, and deleting a working
+// screen to make a point is not a fix.
 function FieldExtras({ project, trade, extras, saveExtras, employees, printSingleExtra }) {
-  const [openId,setOpenId]=useState(null); // id of extra currently being edited, or "__new__" for the new form
+  const [openId,setOpenId]=useState(null); // id of an app-created extra being edited
   const myExtras = (extras||[]).filter(x=>x.projectId===project.id && x.trade===trade).sort((a,b)=>b.id.localeCompare(a.id));
 
-  const createExtra = (description, createdBy) => {
-    const rec = {
-      id: uid(),
-      projectId: project.id,
-      trade,
-      description: description.trim(),
-      materials: [],
-      time: [],
-      status: "In Progress", // In Progress | Ready to Bill | Billed
-      createdBy: createdBy.trim(),
-      createdTs: stamp(),
-      day: todayKey(),
-      history: [],
-    };
-    saveExtras([rec, ...(extras||[])]);
-    setOpenId(rec.id);
-  };
+  // createExtra() lived here and is gone with the + NEW EXTRA button. To put
+  // field-side creation back: restore it, render <NewExtraForm> (still defined
+  // below, deliberately) and give it the button again.
 
   const updateExtra = (id, fn, historyEntry) => {
     saveExtras((extras||[]).map(x=> {
@@ -1811,16 +1928,21 @@ function FieldExtras({ project, trade, extras, saveExtras, employees, printSingl
 
   return (
     <div>
-      {openId !== "__new__" && (
-        <button className="primary" style={S.primaryBtn} onClick={()=>setOpenId("__new__")}>+ NEW EXTRA</button>
-      )}
+      <OfficeExtrasView project={project} trade={trade} />
 
-      {openId === "__new__" && (
-        <NewExtraForm employees={employees} onCancel={()=>setOpenId(null)} onSave={createExtra} />
-      )}
+      <p style={S.hint}>
+        Need an extra written up? Hand it in or call it in &mdash; the office enters every
+        extra in the Draw Manager, and it shows up here once it has been.
+      </p>
 
-      {myExtras.length===0 && openId !== "__new__" && (
-        <div style={S.noNotes}>No extras logged for this {trade} scope.</div>
+      {myExtras.length > 0 && (
+        <div style={{marginTop:22}}>
+          <SectionTitle>STARTED IN THIS APP</SectionTitle>
+          <p style={S.hint}>
+            Older extras that were logged here before the office took them over. Finish
+            them off as normal &mdash; new ones go through the office.
+          </p>
+        </div>
       )}
 
       {myExtras.map(x=>(
@@ -1840,6 +1962,9 @@ function FieldExtras({ project, trade, extras, saveExtras, employees, printSingl
   );
 }
 
+// ⚠️ NOT WIRED UP as of 19 Sep -- nothing renders this. Kept on purpose, because
+// "the office writes up every extra" is a bet on how people actually work, and
+// if it turns out wrong this is the thing to put back. See FieldExtras().
 function NewExtraForm({ employees, onCancel, onSave }) {
   const [desc,setDesc]=useState("");
   const [sel,setSel]=useState(()=>stickyInit(employees).sel);
@@ -5104,6 +5229,23 @@ const S={
   bidHistoryMeta:{fontSize:11,color:C.sub,fontStyle:"italic",marginBottom:4},
   bidHistoryText:{fontFamily:"'Barlow', monospace, sans-serif",fontSize:12,color:C.ink,whiteSpace:"pre-wrap",margin:0,lineHeight:1.4,wordBreak:"break-word"},
   bidViewer:{fontFamily:"'Barlow', monospace, sans-serif",fontSize:13,color:C.ink,whiteSpace:"pre-wrap",background:C.panel,border:`1px solid ${C.line}`,borderRadius:10,padding:"14px 16px",lineHeight:1.5,wordBreak:"break-word"},
+
+  // Accepted bid option, pushed from the Draw Manager. No amounts here ever.
+  optionBox:{marginBottom:14},
+  optionAccepted:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,fontSize:14,fontWeight:600,color:C.green,display:"flex",alignItems:"center",gap:8,background:C.panel,border:`1px solid ${C.green}`,borderRadius:10,padding:"10px 14px"},
+  optionTick:{fontSize:16,lineHeight:1},
+  optionName:{fontFamily:"'Barlow',Arial,sans-serif",letterSpacing:0,fontWeight:600,color:C.ink},
+  optionPending:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,fontSize:13,fontWeight:600,color:C.amber,background:C.panel,border:`1px solid ${C.amber}`,borderRadius:10,padding:"10px 14px",lineHeight:1.4},
+  optionOthers:{marginTop:8,paddingLeft:4},
+  optionOther:{fontSize:13,color:C.sub,padding:"2px 0"},
+
+  // Extras written up by the office. Description, date, status, parts, hours.
+  officeExtra:{background:C.panel,border:`1px solid ${C.line}`,borderRadius:12,padding:"14px 16px",marginBottom:10},
+  officeExtraHead:{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"},
+  officeExtraStatus:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,fontSize:11,fontWeight:600,border:"1px solid",borderRadius:99,padding:"2px 10px"},
+  officeExtraDesc:{fontSize:15,color:C.ink,lineHeight:1.45,whiteSpace:"pre-wrap",wordBreak:"break-word"},
+  officeExtraNote:{fontSize:12,marginTop:6,fontWeight:600},
+  officeExtraHours:{fontSize:13,color:C.sub,marginTop:8},
   // PTO confirmation card on field side
   ptoConfirmCard:{background:"rgba(116,196,118,0.10)",border:`1px solid var(--green)`,borderRadius:10,padding:"14px 16px",marginBottom:14},
   ptoConfirmTitle:{fontFamily:"'Oswald',sans-serif",fontSize:15,fontWeight:700,letterSpacing:1,color:C.green,marginBottom:6},
