@@ -15,6 +15,12 @@ import { createHash, timingSafeEqual } from "node:crypto";
 //    FD_PUSH_CODE     Draw Mgr   upsert into `projects` ONLY.
 //                                Cannot read. Cannot touch anything else.
 //
+//  And one more, for the ServiceTitan lookup proxy added below:
+//
+//    FIELD_API_SECRET Field Dog's own field-api secret. NEVER sent to the
+//                     browser. Marked "contains secret values" in Netlify,
+//                     Production context, so it cannot be read back.
+//
 //  The browser sends the code as:   Authorization: Bearer <code>
 //
 //  FAILS CLOSED. If a variable is unset, too short, or two are equal,
@@ -50,11 +56,23 @@ const FIELD_READ = ALL_COLLECTIONS.filter((c) => c !== "unscheduled");
 const FIELD_WRITE = ["entries", "procurement", "pto", "extras"];
 
 const PERMS = {
-  office: { read: ALL_COLLECTIONS, write: ALL_COLLECTIONS, upsert: ALL_COLLECTIONS },
-  field:  { read: FIELD_READ,      write: FIELD_WRITE,      upsert: FIELD_WRITE },
+  office: { read: ALL_COLLECTIONS, write: ALL_COLLECTIONS, upsert: ALL_COLLECTIONS, lookup: true },
+  field:  { read: FIELD_READ,      write: FIELD_WRITE,      upsert: FIELD_WRITE,     lookup: true },
   // The Draw Manager job push. Write-only, one collection, upsert only.
-  push:   { read: [],              write: [],               upsert: ["projects"] },
+  // 🛑 NO LOOKUP. This credential exists so another APP can push a job header
+  // in. It is not a person, it has no screen, and nothing it does needs a
+  // customer's phone number. Least privilege, same as its empty read list.
+  push:   { read: [],              write: [],               upsert: ["projects"], lookup: false },
 };
+
+// ---- Jon's read-only edge function -----------------------------------------
+// Field Dog's secret IS granted contacts, locations and contractors. The
+// allow-list below is therefore not the security boundary -- the database GRANT
+// is -- but it pins what the BROWSER may ask for, so a future change at Jon's
+// end cannot silently widen what this page can request.
+const FIELD_API_URL =
+  "https://mnqyaaylvrnlvdhtazlj.supabase.co/functions/v1/field-api";
+const FIELD_API_ALLOWED = ["contacts", "locations", "contractors", "version"];
 
 // No rate limiting is possible in a stateless function, so code LENGTH is
 // the only defence against guessing. Six digits (the old PIN's shape) is
@@ -171,6 +189,84 @@ export default async (req) => {
 
     if (req.method === "POST") {
       const body = await req.json().catch(() => null);
+
+      // ---- ServiceTitan lookup, proxied so the secret stays server-side ----
+      //
+      //  This page is served to anyone with the URL, so a secret in it would be
+      //  published. The browser asks this function; this function calls
+      //  field-api. Same shape as the Draw Manager's proxy.
+      if (body && body.action === "field-api") {
+        if (!perms.lookup) return reply(req, 403, { error: "this code cannot look up customers" });
+
+        const secret = env("FIELD_API_SECRET");
+        if (!secret) {
+          console.error("field dog: FIELD_API_SECRET is not set; the lookup proxy is disabled.");
+          return reply(req, 503, { error: "customer lookup is not configured on the server" });
+        }
+
+        const call = body.call && typeof body.call === "object" ? body.call : {};
+        if (!FIELD_API_ALLOWED.includes(call.action)) {
+          return reply(req, 400, { error: "that lookup is not available" });
+        }
+
+        // Only forward the arguments each action actually takes. Passing the
+        // body through wholesale would let the browser set anything field-api
+        // ever learns to accept, including things added after this was written.
+        const out = { action: call.action };
+        const num = (v, max) => {
+          const n = Number(v);
+          return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), max) : null;
+        };
+        if (call.action === "contractors") {
+          if (call.q !== undefined && call.q !== null && String(call.q) !== "") {
+            const q = String(call.q).trim();
+            if (q.length < 2 || q.length > 60) {
+              return reply(req, 400, { error: "Type at least 2 characters to search." });
+            }
+            out.q = q;
+          }
+          const n = num(call.limit, 500); if (n) out.limit = n;
+        } else if (call.action === "contacts") {
+          if (call.customerId !== undefined && call.customerId !== null) out.customerId = String(call.customerId);
+          const n = num(call.limit, 500); if (n) out.limit = n;
+        } else if (call.action === "locations") {
+          if (call.customerId !== undefined && call.customerId !== null) out.customerId = String(call.customerId);
+          if (typeof call.activeOnly === "boolean") out.activeOnly = call.activeOnly;
+          if (call.afterId !== undefined && call.afterId !== null) out.afterId = String(call.afterId);
+          if (typeof call.since === "string" && call.since) out.since = call.since;
+          const n = num(call.limit, 500); if (n) out.limit = n;
+        }
+
+        let r, j = null, text = "";
+        try {
+          r = await fetch(FIELD_API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-field-secret": secret },
+            body: JSON.stringify(out),
+          });
+          text = await r.text();
+          try { j = JSON.parse(text); } catch {}
+        } catch (err) {
+          console.error("field dog: could not reach field-api:", err);
+          return reply(req, 502, { error: "could not reach ServiceTitan" });
+        }
+
+        if (!r.ok || j === null) {
+          // field-api returns a `ref` on a 500 that matches a line in Jon's
+          // function log. Pass it through; it is the difference between "it
+          // broke" and him reading the real error in seconds.
+          const ref = j && j.ref ? j.ref : null;
+          console.error("field dog: field-api HTTP " + r.status + (ref ? " ref=" + ref : "") + " for " + out.action);
+          return reply(req, 502, {
+            error: (j && j.error) || ("ServiceTitan lookup returned HTTP " + r.status),
+            ref,
+            status: r.status,
+          });
+        }
+
+        return reply(req, 200, { ok: true, result: j });
+      }
+
       const { collection, data, upsert } = body || {};
 
       if (!ALL_COLLECTIONS.includes(collection)) {
