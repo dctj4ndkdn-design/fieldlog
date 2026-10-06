@@ -3345,7 +3345,18 @@ function ProjectsAdmin({ projects, saveProjects, contractors, entries, saveEntri
           <div style={{...S.adminRow, ...(editingId===p.id || viewingChecklistsId===p.id?{borderColor:"var(--amber)"}:{})}}>
             <div style={{flex:1}}>
               <div style={S.adminName}>{p.name}</div>
-              <div style={S.adminMeta}>{p.contractor||"—"}</div>
+              <div style={S.adminMeta}>
+                {p.contractor||"—"}
+                {/* Whether a job is LINKED to a ServiceTitan customer is otherwise
+                    invisible: the id lives on the project record and nothing ever
+                    renders it. That is fine for the crew, who do not care, and
+                    useless for Bryan the moment something does not work. The id
+                    itself is deliberately NOT shown -- a bare 8-digit number tells
+                    nobody anything. Linked or not is the whole question. */}
+                {p.customerId
+                  ? <span style={{...S.stTag, color:"var(--green)", border:"1px solid var(--green)"}}>ST LINKED</span>
+                  : <span style={{...S.stTag, color:"var(--sub)", border:"1px solid var(--line)"}}>NOT LINKED</span>}
+              </div>
               <div style={S.adminAddr}>{p.address||"—"}</div>
               <div style={S.numList}>{p.workTypes.map(w=><span key={w} style={S.numChip}>{w}: <strong style={{color:"var(--ink)"}}>{(p.projectNumbers||{})[w]||"n/a"}</strong></span>)}</div>
             </div>
@@ -5446,6 +5457,7 @@ const S={
   contactLabel:{fontSize:11,color:C.sub,letterSpacing:1,textTransform:"uppercase"},
   contactNote:{fontSize:11,color:C.sub,padding:"6px 0"},
   contactWarn:{fontSize:12,color:C.amber,fontWeight:600,padding:"6px 0",borderTop:`1px solid ${C.line}`},
+  stTag:{display:"inline-block",fontFamily:"'Oswald',sans-serif",fontSize:10,letterSpacing:1,fontWeight:600,padding:"1px 6px",borderRadius:4,marginLeft:8,verticalAlign:"middle"},
   contactStop:{fontSize:13,color:"#ff6b6b",fontWeight:700,padding:"8px 10px",marginBottom:8,border:"1px solid #ff6b6b",borderRadius:8},
   editBanner:{fontSize:12,color:C.amber,fontWeight:600,marginBottom:12,fontStyle:"italic"},
   editBtn:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,background:"transparent",border:`1px solid ${C.line}`,color:C.ink,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:600,flexShrink:0},
