@@ -130,8 +130,21 @@ function asteriskTally(rows, key) {
   return { ends_with_single_asterisk: single, ends_with_double_asterisk: double, no_asterisk: plain, other: other };
 }
 
-async function callAction(secret, action) {
-  const body = action === "version" ? { action } : { action, limit: SAMPLE };
+// Each action is tried several ways. A permission problem fails the same way
+// every time; a PARAMETER problem fails only on the variant that carries it.
+// Telling those two apart is the whole point of running this twice.
+function variantsFor(action) {
+  if (action === "version") return [{ label: "bare", body: { action } }];
+  const v = [
+    { label: "bare", body: { action } },
+    { label: "limit", body: { action, limit: SAMPLE } },
+  ];
+  if (action === "contractors") v.push({ label: "search", body: { action, q: "a" } });
+  if (action !== "contractors") v.push({ label: "limit-1", body: { action, limit: 1 } });
+  return v;
+}
+
+async function callAction(secret, action, body) {
   const started = Date.now();
   let res;
   try {
@@ -191,9 +204,15 @@ async function callAction(secret, action) {
       result.name_column = nameCol;
       result.asterisk_tally = asteriskTally(json[arrayKey], nameCol);
     }
-  } else if (action === "version") {
-    // version returns scalars, not rows. Those are safe to show as-is.
+  }
+
+  if (action === "version") {
+    // version is CONFIGURATION, not customer data — action names, build stamp,
+    // which caller the secret resolves to. All of it is safe and all of it is
+    // useful, so show the whole thing rather than describing its shape.
     result.value = json;
+    delete result.shape;
+    delete result.rows_key;
   }
 
   return result;
@@ -228,26 +247,62 @@ export default async (req) => {
 
   const results = [];
   for (const a of actions) {
-    results.push(await callAction(secret, a));
+    for (const v of variantsFor(a)) {
+      const r = await callAction(secret, a, v.body);
+      r.variant = v.label;
+      r.sent = v.body;
+      results.push(r);
+    }
   }
 
-  // A plain-language read of what came back, so the result is useful even
-  // to someone who does not want to read JSON.
-  const okList = results.filter((r) => r.ok).map((r) => r.action);
-  const noList = results.filter((r) => !r.ok).map((r) => r.action);
-  const contacts = results.find((r) => r.action === "contacts");
+  // ------------------------------------------------------------------
+  //  THREE BUCKETS, NOT TWO. This is the whole correction.
+  //
+  //  "Did not work" is not one thing. An action the secret is NOT ALLOWED
+  //  to call is the security design doing its job. An action the secret IS
+  //  allowed to call that then FAILS is a broken thing wearing the same
+  //  coat. Putting them in one bucket hides a fault behind a reassuring
+  //  word, which is the failure this whole project is recovering from.
+  // ------------------------------------------------------------------
+  const isNotPermitted = (r) =>
+    !r.ok && r.http_status === 400 && /not permitted|unknown/i.test(r.error || "");
+  const isBroken = (r) => !r.ok && !isNotPermitted(r);
+
+  const byAction = (pred) => [
+    ...new Set(results.filter(pred).map((r) => r.action)),
+  ];
+
+  const worked = byAction((r) => r.ok);
+  const notPermitted = byAction(isNotPermitted).filter((a) => !worked.includes(a));
+  const broken = byAction(isBroken).filter((a) => !worked.includes(a));
+
+  // What field-api itself says this secret may do, straight from `version`.
+  const versionRow = results.find((r) => r.action === "version" && r.ok);
+  const allowedPerApi =
+    (versionRow && versionRow.value && Array.isArray(versionRow.value.actions))
+      ? versionRow.value.actions
+      : null;
 
   const summary = {
     secret_present: true,
-    actions_that_worked: okList,
-    actions_that_were_refused: noList,
-    which_app_this_looks_like:
-      contacts && contacts.ok
-        ? "FIELD DOG (contacts readable)"
-        : contacts && !contacts.ok
-          ? "DRAW MANAGER (contacts refused, which is correct and is the privacy boundary working)"
-          : "unknown",
+    actions_that_worked: worked,
+    actions_refused_on_purpose: notPermitted,
+    actions_that_are_BROKEN: broken,
+    verdict:
+      broken.length > 0
+        ? "PROBLEM. " + broken.join(", ") + " is allowed for this secret but FAILED. That is a fault, not a permission. Do not read the refusals as an all-clear."
+        : worked.length > 0
+          ? "Healthy. Everything this secret is allowed to do, it did."
+          : "Nothing worked at all — check the secret.",
   };
+
+  if (allowedPerApi) {
+    summary.actions_this_secret_is_allowed = allowedPerApi;
+    const allowedButFailed = allowedPerApi.filter((a) => broken.includes(a));
+    if (allowedButFailed.length) {
+      summary.allowed_but_failing = allowedButFailed;
+    }
+  }
 
   return new Response(JSON.stringify({ summary, results }, null, 2), {
     status: 200,
