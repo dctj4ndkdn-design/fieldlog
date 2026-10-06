@@ -381,6 +381,46 @@ async function saveCollection(collection, data) {
   return r.json();
 }
 
+// =================== SERVICETITAN LOOKUP (field-api) ===================
+//
+//  Goes through THIS APP'S OWN function, which holds the secret. The browser
+//  never sees it. `data.mjs` decides which lookups are available and which
+//  access codes may make them -- the push credential cannot look anything up.
+//
+//  🔑 WHY THIS EXISTS AT ALL: the crew needs a phone number at 7am, and until
+//  now the only numbers in this app were the ones somebody typed into the
+//  office contractor list by hand.
+async function fieldApi(call) {
+  const r = await fetch(API, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ action: "field-api", call }),
+  });
+  if (r.status === 401) throw new AuthError("code rejected");
+  let body = null;
+  try { body = await r.json(); } catch {}
+  if (!r.ok || !body || !body.ok) {
+    const e = new Error((body && body.error) || ("lookup failed (" + r.status + ")"));
+    if (body && body.ref) e.ref = body.ref;
+    throw e;
+  }
+  return body.result;
+}
+
+// One fetch per customer per session. Switching between jobs on the same
+// contractor must not hammer the function, and a crew on a bad signal should
+// not pay for the same lookup twice.
+const _contactCache = new Map();
+function contactsFor(customerId) {
+  const key = String(customerId);
+  if (!_contactCache.has(key)) {
+    _contactCache.set(key, fieldApi({ action: "contacts", customerId: key })
+      .then(res => (res && res.contacts) || [])
+      .catch(err => { _contactCache.delete(key); throw err; }));
+  }
+  return _contactCache.get(key);
+}
+
 // Ask the server whether a code is good, and what it is good for.
 // Returns "field", "office", or null. Does not store anything.
 async function checkCode(code) {
@@ -779,6 +819,114 @@ function JobSelectBody({ projects, onPick }) {
   );
 }
 
+// ─── JOB CONTACTS ────────────────────────────────────────────────────────────
+//
+//  Live from ServiceTitan when the job carries a customer id, and from this
+//  app's own saved contractor list when it does not.
+//
+//  🛑 THE RULE THAT MATTERS, AND IT IS JON'S: IF THE LOOKUP SUCCEEDS AND
+//  RETURNS NOTHING, SAY "NO CONTACT DETAILS". DO NOT FALL BACK TO ANOTHER
+//  SOURCE. The contacts view only ever returns businesses and marked
+//  contractors, so an empty result means "we hold no number for them", not
+//  "look somewhere else". No phone numbers at all beats thirteen wrong ones.
+//
+//  A FAILED lookup is a different thing from an empty one. Offline in a field
+//  with one bar is normal here, so a failure DOES show the saved list -- but
+//  LABELLED, never silently. The crew should always be able to tell which
+//  source they are looking at.
+function JobContacts({ project, fallback }) {
+  const customerId = project.customerId || "";
+  const [live, setLive] = useState({ status: customerId ? "loading" : "none" });
+
+  useEffect(() => {
+    let alive = true;
+    if (!customerId) { setLive({ status: "none" }); return; }
+    setLive({ status: "loading" });
+    contactsFor(customerId)
+      .then((rows) => { if (alive) setLive({ status: "ok", rows }); })
+      .catch((err) => { if (alive) setLive({ status: "error", msg: String(err.message || err), ref: err.ref }); });
+    return () => { alive = false; };
+  }, [customerId]);
+
+  const head = (extra) => (
+    <div style={S.contactsHead}>JOB CONTACTS{project.contractor ? ` · ${project.contractor}` : ""}{extra ? ` · ${extra}` : ""}</div>
+  );
+
+  // The saved list: this app's own contractor records, matched by name.
+  const savedRows = (fallback || []).map((c) => (
+    <div key={c.id} style={S.contactRow}>
+      <span style={S.contactName}>{c.name || "—"}</span>
+      {c.phone
+        ? <a href={`tel:${String(c.phone).replace(/[^0-9+]/g, "")}`} style={S.contactPhone}>{fmtPhone(c.phone)}</a>
+        : <span style={{color:"var(--sub)"}}>no #</span>}
+    </div>
+  ));
+
+  if (live.status === "none") {
+    if (!savedRows.length) return null;   // unchanged from before: show nothing
+    return <div style={S.contactsBox}>{head()}{savedRows}</div>;
+  }
+
+  if (live.status === "loading") {
+    return <div style={S.contactsBox}>{head()}<div style={S.contactNote}>Looking up contacts…</div></div>;
+  }
+
+  if (live.status === "error") {
+    return (
+      <div style={S.contactsBox}>
+        {head(savedRows.length ? "SAVED LIST" : null)}
+        <div style={S.contactWarn}>
+          Couldn't reach ServiceTitan{live.ref ? ` (ref ${live.ref})` : ""}.
+          {savedRows.length ? " Showing Field Dog's own saved list instead." : ""}
+        </div>
+        {savedRows}
+      </div>
+    );
+  }
+
+  const rows = live.rows || [];
+  if (!rows.length) {
+    return (
+      <div style={S.contactsBox}>
+        {head()}
+        <div style={S.contactNote}>No contact details on file for this customer.</div>
+      </div>
+    );
+  }
+
+  // Phones before emails: at 7am the crew wants to ring somebody, not write.
+  const rank = (t) => (t === "MobilePhone" ? 0 : t === "Phone" ? 1 : t === "Fax" ? 3 : 2);
+  const sorted = rows.slice().sort((a, b) => rank(a.type) - rank(b.type));
+  const stop = rows.some((r) => r.do_not_service === true);
+
+  return (
+    <div style={S.contactsBox}>
+      {head("SERVICETITAN")}
+      {stop && <div style={S.contactStop}>DO NOT SERVICE — check with the office before starting</div>}
+      {sorted.map((r, i) => {
+        const isEmail = r.type === "Email";
+        const digits = String(r.value || "").replace(/[^0-9+]/g, "");
+        // `label` is free text and is never cleaned; about a quarter are blank.
+        // Treat a person's name as a BONUS, not a field.
+        const who = (r.label && String(r.label).trim()) || (isEmail ? "Email" : r.type === "MobilePhone" ? "Mobile" : "Phone");
+        return (
+          <div key={i} style={S.contactRow}>
+            <span style={S.contactName}>
+              {who}
+              {/* do_not_text is null on every email row, which means "not a
+                  phone" rather than "unknown". Never badge an email with it. */}
+              {!isEmail && r.do_not_text === true && <span style={{...S.contactLabel, color:"var(--amber)", marginLeft:8}}>no texts</span>}
+            </span>
+            {isEmail
+              ? <a href={`mailto:${r.value}`} style={{...S.contactPhone, fontSize:13}}>{r.value}</a>
+              : <a href={`tel:${digits}`} style={S.contactPhone}>{fmtPhone(r.value)}</a>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Workspace({ project, back, entries, saveEntries, employees, contractors, procurement, saveProcurement, extras, saveExtras, printSingleExtra }) {
   const [trade,setTrade]=useState(project.workTypes[0]);
   const [tab,setTab]=useState("checklist");
@@ -796,17 +944,7 @@ function Workspace({ project, back, entries, saveEntries, employees, contractors
         <div style={S.tradeRow}>{project.workTypes.map(w=>
           <button key={w} className="trade" style={{...S.tradeBtn,...(trade===w?S.tradeOn:{})}} onClick={()=>setTrade(w)}>{w}</button>)}</div>}
       <div style={S.projNumBanner}>{trade} project #: <strong style={{color:"var(--ink)"}}>{projNum||"—"}</strong></div>
-      {jobContacts.length>0 && (
-        <div style={S.contactsBox}>
-          <div style={S.contactsHead}>JOB CONTACTS{project.contractor?` · ${project.contractor}`:""}</div>
-          {jobContacts.map(c=>(
-            <div key={c.id} style={S.contactRow}>
-              <span style={S.contactName}>{c.name||"—"}</span>
-              {c.phone ? <a href={`tel:${c.phone.replace(/[^0-9+]/g,"")}`} style={S.contactPhone}>{fmtPhone(c.phone)}</a> : <span style={{color:"var(--sub)"}}>no #</span>}
-            </div>
-          ))}
-        </div>
-      )}
+      <JobContacts project={project} fallback={jobContacts} />
       <TabBar
         value={tab}
         onChange={setTab}
@@ -5305,6 +5443,10 @@ const S={
   contactRow:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,padding:"6px 0",borderTop:`1px solid ${C.line}`},
   contactName:{fontSize:14,color:C.ink,fontWeight:500},
   contactPhone:{fontSize:15,color:C.green,fontWeight:600,textDecoration:"none"},
+  contactLabel:{fontSize:11,color:C.sub,letterSpacing:1,textTransform:"uppercase"},
+  contactNote:{fontSize:11,color:C.sub,padding:"6px 0"},
+  contactWarn:{fontSize:12,color:C.amber,fontWeight:600,padding:"6px 0",borderTop:`1px solid ${C.line}`},
+  contactStop:{fontSize:13,color:"#ff6b6b",fontWeight:700,padding:"8px 10px",marginBottom:8,border:"1px solid #ff6b6b",borderRadius:8},
   editBanner:{fontSize:12,color:C.amber,fontWeight:600,marginBottom:12,fontStyle:"italic"},
   editBtn:{fontFamily:"'Oswald',sans-serif",letterSpacing:1,background:"transparent",border:`1px solid ${C.line}`,color:C.ink,borderRadius:8,padding:"8px 14px",cursor:"pointer",fontSize:13,fontWeight:600,flexShrink:0},
   tradeRow:{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"},
