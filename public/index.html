@@ -116,7 +116,7 @@
 <script crossorigin src="https://unpkg.com/@babel/standalone@7.24.10/babel.min.js"></script>
 
 <script type="text/babel" data-presets="react">
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useRef } = React;
 
 // =================== CONFIG ===================
 // OFFICE_PIN removed. The access code is now validated by the server
@@ -376,9 +376,120 @@ async function saveCollection(collection, data) {
     body: JSON.stringify({ collection, data }),
   });
   if (r.status === 401) throw new AuthError("code rejected");
-  if (r.status === 403) throw new Error("This access code isn't allowed to change " + collection + ".");
+  if (r.status === 403) { const e = new Error("This access code isn't allowed to change " + collection + "."); e.noRetry = true; throw e; }
   if (!r.ok) throw new Error("save failed (" + r.status + ")");
   return r.json();
+}
+
+// =================== SAVING ONE ROW INSTEAD OF THE WHOLE LIST ===============
+//
+//  WHY THIS EXISTS. Until now every field save sent the app's WHOLE in-memory
+//  list back and the server replaced the collection with it. A phone loads the
+//  list ONCE at app start and never re-reads it, so two men on one job look
+//  like this:
+//
+//     07:00  A and B both open the app          both hold the same 500 rows
+//     10:00  A ticks a checklist                A sends 501. Server stores 501.
+//     10:05  B ticks a checklist                B still holds 07:00's 500, plus
+//                                               his own = 501 WITHOUT A's row.
+//                                               Server stores that.
+//            --> A's 10:00 work no longer exists. HTTP 200. Nobody told.
+//
+//  And because the app paints the screen optimistically and never re-reads,
+//  A's own phone goes on showing his entry all day. He finds out tomorrow.
+//
+//  THE FIX WAS ALREADY IN THE SERVER AND WAS NEVER CALLED. `data.mjs` has a
+//  merge-by-id upsert route -- its own comment says "never overwrites the whole
+//  collection" -- and the FIELD tier has been permitted to use it on entries,
+//  procurement, pto and extras since 14 Aug. So: a save that only ADDS or EDITS
+//  rows now sends each changed row on its own. A stale phone can no longer
+//  delete anybody, however old its copy is.
+//
+//  A save that REMOVES a row cannot be said that way, so it still writes the
+//  whole array -- but it REBASES on the server's current copy first, so it only
+//  drops the ids this user actually deleted. (The field side has no delete at
+//  all; both delete paths are office-side.)
+
+// Only these four take the per-row path, and the reason is specific: they are
+// the four the FIELD tier can write, so they are the only ones many phones
+// touch at once. The office-owned collections stay on the whole-array write
+// because the server's upsert route carries `projects`-specific bid-history
+// reconciliation ("don't seed/clobber with an empty note"), which would quietly
+// ignore the office CLEARING a bid. The whole-array write is now rebased, so
+// office saves stopped undoing field work anyway.
+const ROW_SAFE = ["entries", "procurement", "pto", "extras"];
+
+async function saveRecord(collection, record) {
+  const r = await fetch(API, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ collection, upsert: record }),
+  });
+  if (r.status === 401) throw new AuthError("code rejected");
+  if (r.status === 403) { const e = new Error("This access code isn't allowed to change " + collection + "."); e.noRetry = true; throw e; }
+  if (!r.ok) throw new Error("save failed (" + r.status + ")");
+  return r.json();
+}
+
+const _napMs = (ms) => new Promise((res) => setTimeout(res, ms));
+
+// Job-site signal drops. One blip should not cost a man his entry.
+async function withRetry(fn, tries) {
+  tries = tries || 3;
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      if (e instanceof AuthError) throw e;   // a refused code will not fix itself
+      if (e && e.noRetry) throw e;
+      last = e;
+      if (i < tries - 1) await _napMs(600 * (i + 1));
+    }
+  }
+  throw last;
+}
+
+// What changed between the list we last knew the server had and the list the
+// app is now saving. Returns null when a per-row merge is not safe -- a row
+// with no id, or two rows sharing one.
+function diffById(oldArr, newArr) {
+  const o = Array.isArray(oldArr) ? oldArr : [];
+  const n = Array.isArray(newArr) ? newArr : [];
+  const oMap = new Map(), nMap = new Map();
+  for (const r of o) { if (!r || r.id == null) return null; oMap.set(r.id, r); }
+  for (const r of n) { if (!r || r.id == null) return null; nMap.set(r.id, r); }
+  if (oMap.size !== o.length || nMap.size !== n.length) return null;  // duplicate ids
+  const changed = [];
+  for (const [id, rec] of nMap) {
+    const prev = oMap.get(id);
+    if (!prev || JSON.stringify(prev) !== JSON.stringify(rec)) changed.push(rec);
+  }
+  const removed = [];
+  for (const id of oMap.keys()) if (!nMap.has(id)) removed.push(id);
+  return { changed, removed };
+}
+
+// A whole-array write that does not undo everybody else. Read the server's
+// current copy, drop only the ids THIS user deleted, apply only the rows THIS
+// user changed, write that back.
+async function saveRebased(collection, data, before) {
+  const d = before === undefined ? null : diffById(before, data);
+  if (!d) return saveCollection(collection, data);            // cannot reason about it
+  let server = null;
+  try {
+    const all = await loadAll();
+    server = all && Array.isArray(all[collection]) ? all[collection] : null;
+  } catch (e) { server = null; }
+  if (!server) return saveCollection(collection, data);       // cannot rebase; old behaviour
+  const out = server.filter((r) => !(r && d.removed.indexOf(r.id) >= 0));
+  const pos = new Map();
+  out.forEach((r, i) => { if (r && r.id != null) pos.set(r.id, i); });
+  const fresh = [];
+  for (const rec of d.changed) {
+    const at = pos.get(rec.id);
+    if (at === undefined) fresh.push(rec); else out[at] = rec;
+  }
+  return saveCollection(collection, fresh.concat(out));
 }
 
 // =================== SERVICETITAN LOOKUP (field-api) ===================
@@ -482,6 +593,16 @@ function App() {
   const [tier, setTier] = useState(null);
   const [needCode, setNeedCode] = useState(() => !loadCode());
   const [syncing, setSyncing] = useState(false);
+  // A save that fails must NOT be silent and must NOT wipe what he typed.
+  const [syncFail, setSyncFail] = useState(null);
+  // The clock time of the last successful read. On screen, because the whole
+  // problem here is a man not knowing whether what he is looking at is current.
+  const [syncedAt, setSyncedAt] = useState(null);
+  // The last list we know the server holds, per collection. persist() diffs
+  // against this to work out which rows to send. Seeded by refresh().
+  const lastSaved = useRef({});
+  const busyRef = useRef(false);
+  const lastRefreshAt = useRef(0);
   // TV mode: detected from ?tv=1 in URL, OR toggled via in-app button
   const [tvMode, setTvMode] = useState(()=>{
     if(typeof window==="undefined") return false;
@@ -516,6 +637,17 @@ function App() {
       setExtras(d.extras || []);
       setAssignments(d.assignments || []);
       setUnscheduled(d.unscheduled || []);
+      // Remember exactly what the server handed us, so the next save can send
+      // only what actually changed rather than the whole list.
+      lastSaved.current = {
+        projects: d.projects || [], contractors: d.contractors || [],
+        entries: d.entries || [], employees: d.employees || [],
+        procurement: d.procurement || [], pto: d.pto || [],
+        extras: d.extras || [], assignments: d.assignments || [],
+        unscheduled: d.unscheduled || [],
+      };
+      lastRefreshAt.current = Date.now();
+      setSyncedAt(new Date());
       setStatus("ok");
     } catch (e) {
       // A rejected code is not a server outage -- drop it and re-prompt.
@@ -526,20 +658,58 @@ function App() {
   useEffect(() => { refresh(); }, [refresh]);
 
   const persist = useCallback(async (collection, data, setter) => {
-    setter(data); setSyncing(true);
-    try { await saveCollection(collection, data); }
+    setter(data); setSyncing(true); busyRef.current = true;
+    const before = lastSaved.current[collection];
+    try {
+      const d = before === undefined ? null : diffById(before, data);
+      if (d && d.removed.length === 0 && d.changed.length === 0) {
+        // Nothing actually changed. Don't spend a round trip on it.
+      } else if (ROW_SAFE.indexOf(collection) >= 0 && d && d.removed.length === 0 && d.changed.length <= 40) {
+        // The ordinary case: he added or edited a row. Send that row only.
+        for (const rec of d.changed) await withRetry(() => saveRecord(collection, rec));
+      } else {
+        // A delete, or a bulk office edit. Whole array, but rebased first.
+        await withRetry(() => saveRebased(collection, data, before));
+      }
+      lastSaved.current[collection] = data;
+      setSyncFail(null);
+    }
     catch (e) {
       if (e instanceof AuthError) {
         clearCode(); setTier(null); setNeedCode(true);
         // Say so. Otherwise the user re-enters their code, refresh() overwrites
         // local state, and the thing they just submitted vanishes silently.
         alert("Your access code was refused, so that did NOT save.\n\nEnter your code again, then re-enter what you just submitted.");
+        await refresh();
       } else {
-        alert("Couldn't save to the server — reloading latest data.\n\n" + (e.message || e));
+        // 🔑 DO NOT refresh() here. refresh() would wipe what he just typed off
+        // the screen, which is the complaint this whole update exists to fix.
+        // Keep it, say plainly that it did not save, and leave lastSaved alone
+        // so the NEXT successful save re-sends it.
+        setSyncFail(collection);
+        alert("THAT DID NOT SAVE.\n\nIt is still on your screen and it will be sent again next time you save something. Nothing has been lost.\n\nIf the dot at the top stays red, move somewhere with signal and press ⟳.\n\n(" + (e.message || e) + ")");
       }
-      await refresh();
     }
-    finally { setSyncing(false); }
+    finally { setSyncing(false); busyRef.current = false; }
+  }, [refresh]);
+
+  // ── COMING BACK TO THE APP RE-READS IT ─────────────────────────────────────
+  // Upserts stop a stale phone DESTROYING another man's work. This is what lets
+  // him SEE it. Without this a phone opened at 7am still shows 7am at 3pm.
+  // Throttled, and never while a save is in flight.
+  useEffect(() => {
+    const onWake = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      if (busyRef.current) return;
+      if (Date.now() - lastRefreshAt.current < 20000) return;
+      refresh();
+    };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
   }, [refresh]);
 
   const saveProjects    = useCallback((p) => persist("projects", p, setProjects), [persist]);
@@ -619,7 +789,7 @@ function App() {
 
   return (
     <div>
-      <Header side={side} setSide={setSide} isOffice={isOffice} signOut={()=>{ clearCode(); setTier(null); setSide("field"); setNeedCode(true); }} syncing={syncing} onRefresh={refresh} />
+      <Header side={side} setSide={setSide} isOffice={isOffice} signOut={()=>{ clearCode(); setTier(null); setSide("field"); setNeedCode(true); }} syncing={syncing} syncFail={syncFail} syncedAt={syncedAt} onRefresh={refresh} />
       {!showOffice ? (
         <FieldSide projects={projects.filter(p=>!p.removed)} entries={entries} saveEntries={saveEntries} employees={employees} contractors={contractors} procurement={procurement} saveProcurement={saveProcurement} pto={pto} savePto={savePto} extras={extras} saveExtras={saveExtras} printSingleExtra={printSingleExtra} assignments={assignments} onTvMode={()=>setTvMode(true)} />
       ) : (
@@ -630,11 +800,24 @@ function App() {
   );
 }
 
-function Header({ side, setSide, isOffice, signOut, syncing, onRefresh }) {
+const fmtClock = (d) => {
+  if (!d) return "";
+  try {
+    let h = d.getHours(), m = d.getMinutes();
+    const ap = h >= 12 ? "pm" : "am";
+    h = h % 12; if (h === 0) h = 12;
+    return h + ":" + (m < 10 ? "0" + m : m) + ap;
+  } catch (e) { return ""; }
+};
+
+function Header({ side, setSide, isOffice, signOut, syncing, syncFail, syncedAt, onRefresh }) {
   return (
     <header style={S.header}>
       <div style={S.brand}>FIELD<span style={{color:"var(--amber)"}}>DOG</span><span style={S.brandTag}>JOB TRACKING</span></div>
-      <span title={syncing?"saving…":"synced"} className="syncdot" style={{background:syncing?"var(--amber)":"var(--green)"}} />
+      <span title={syncFail?("NOT SAVED — "+syncFail+" did not reach the server. Press ⟳ when you have signal."):(syncing?"saving…":"synced")} className="syncdot" style={{background:syncFail?"var(--red)":(syncing?"var(--amber)":"var(--green)")}} />
+      {syncFail
+        ? <span style={{fontSize:11,fontWeight:700,color:"var(--red)",letterSpacing:".04em",whiteSpace:"nowrap"}}>NOT SAVED</span>
+        : <span title="When this device last read the server" style={{fontSize:11,color:"var(--sub)",whiteSpace:"nowrap"}}>{syncing ? "saving\u2026" : (syncedAt ? fmtClock(syncedAt) : "")}</span>}
       <button className="lockbtn" style={{...S.lockBtn,padding:"8px 10px"}} onClick={onRefresh} title="Reload latest">⟳</button>
       {isOffice && (
         <div style={S.toggle}>
